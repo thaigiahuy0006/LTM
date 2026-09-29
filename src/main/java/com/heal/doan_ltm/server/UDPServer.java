@@ -14,9 +14,17 @@ public class UDPServer {
                 String req = new String(p.getData(), 0, p.getLength(), "UTF-8");
                 String res = "FAIL";
 
+                // Tách gói tin để phân loại
                 String[] parts = req.split(";;;", -1);
 
-                if (parts[0].equals("LOGIN") && parts.length >= 3) res = login(parts[1], parts[2]);
+                if (req.startsWith("SAVEMSG;;;")) {
+                    // Tách tối đa 4 mảng để tránh lỗi nếu người dùng nhắn ký tự ";;;"
+                    String[] msgParts = req.split(";;;", 4);
+                    if (msgParts.length >= 4) saveMessage(msgParts[1], msgParts[2], msgParts[3]);
+                    res = "OK";
+                }
+                else if (parts[0].equals("GETMSG") && parts.length >= 3) res = getMessages(parts[1], parts[2]);
+                else if (parts[0].equals("LOGIN") && parts.length >= 3) res = login(parts[1], parts[2]);
                 else if (parts[0].equals("REGISTER") && parts.length >= 7) res = register(parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
                 else if (parts[0].equals("UPDATE") && parts.length >= 4) res = update(parts[1], parts[2], parts[3]);
                 else if (parts[0].equals("ONLINE") && parts.length >= 2) { updateOnline(parts[1], p.getAddress().getHostAddress(), p.getPort()); res = "OK"; }
@@ -24,7 +32,7 @@ public class UDPServer {
                 else if (parts[0].equals("ADD") && parts.length >= 3) res = addFriend(parts[1], parts[2]);
                 else if (parts[0].equals("ACCEPT") && parts.length >= 3) res = acceptFriend(parts[1], parts[2]);
                 else if (parts[0].equals("DECLINE") && parts.length >= 3) res = declineFriend(parts[1], parts[2]);
-                else if (parts[0].equals("UNFRIEND") && parts.length >= 3) res = unfriend(parts[1], parts[2]); // TÍNH NĂNG XÓA KẾT BẠN
+                else if (parts[0].equals("UNFRIEND") && parts.length >= 3) res = unfriend(parts[1], parts[2]);
                 else if (parts[0].equals("GETDATA") && parts.length >= 2) res = getData(parts[1]);
 
                 if (!res.equals("OK")) {
@@ -37,6 +45,27 @@ public class UDPServer {
 
     private static Connection getConn() throws Exception {
         return DriverManager.getConnection("jdbc:mysql://localhost:3306/p2p_chat?characterEncoding=UTF8", "root", "");
+    }
+
+    // --- 2 HÀM MỚI ĐỂ XỬ LÝ DATABASE TIN NHẮN ---
+    private static void saveMessage(String sender, String receiver, String content) {
+        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO messages(sender, receiver, content) VALUES(?,?,?)")) {
+            s.setString(1, sender); s.setString(2, receiver); s.setString(3, content);
+            s.executeUpdate();
+        } catch (Exception e) {}
+    }
+
+    private static String getMessages(String u1, String u2) {
+        StringBuilder sb = new StringBuilder("MSGDATA;;;");
+        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("SELECT sender, content FROM messages WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?) ORDER BY id ASC")) {
+            s.setString(1, u1); s.setString(2, u2); s.setString(3, u2); s.setString(4, u1);
+            ResultSet rs = s.executeQuery();
+            while(rs.next()) {
+                // Định dạng dữ liệu: sender::content||
+                sb.append(rs.getString("sender")).append("::").append(rs.getString("content")).append("||");
+            }
+        } catch (Exception e) {}
+        return sb.toString();
     }
 
     private static String login(String u, String p) {
@@ -90,7 +119,6 @@ public class UDPServer {
         } catch (Exception e) {} return "FAIL";
     }
 
-    // HÀM XÓA KẾT BẠN
     private static String unfriend(String u1, String u2) {
         try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("DELETE FROM friends WHERE (user1=? AND user2=?) OR (user1=? AND user2=?)")) {
             s.setString(1, u1); s.setString(2, u2);

@@ -65,7 +65,6 @@ public class MainClient extends JFrame {
         sidebar.setPreferredSize(new Dimension(340, 0)); sidebar.setBackground(Color.WHITE);
         sidebar.setBorder(BorderFactory.createMatteBorder(0, 0, 0, 1, new Color(230, 230, 230)));
 
-        // --- PROFILE PANEL ---
         JPanel profilePanel = new JPanel(); profilePanel.setLayout(new BoxLayout(profilePanel, BoxLayout.Y_AXIS));
         profilePanel.setBackground(Color.WHITE); profilePanel.setBorder(new EmptyBorder(25, 20, 15, 20));
 
@@ -87,12 +86,8 @@ public class MainClient extends JFrame {
         profilePanel.add(avatarLabel); profilePanel.add(Box.createVerticalStrut(10));
         profilePanel.add(nameLabel); profilePanel.add(Box.createVerticalStrut(10)); profilePanel.add(btnEditProfile);
 
-        // --- MID PANEL ---
         JPanel midPanel = new JPanel(new BorderLayout()); midPanel.setBackground(Color.WHITE);
-
-        // Đổi sang BorderLayout để nút lời mời tràn viền 100%
-        JPanel pnlTopMid = new JPanel(new BorderLayout());
-        pnlTopMid.setBackground(Color.WHITE);
+        JPanel pnlTopMid = new JPanel(new BorderLayout()); pnlTopMid.setBackground(Color.WHITE);
 
         JPanel pnlSearch = new JPanel(new BorderLayout(10, 0)); pnlSearch.setBackground(Color.WHITE);
         pnlSearch.setBorder(new EmptyBorder(5, 20, 15, 20));
@@ -103,7 +98,6 @@ public class MainClient extends JFrame {
         btnSearch.setPreferredSize(new Dimension(60, 35));
         pnlSearch.add(txtPhone, BorderLayout.CENTER); pnlSearch.add(btnSearch, BorderLayout.EAST);
 
-        // Dùng khoảng trắng (space) để thụt lề chữ, giúp background màu xám tràn hết viền
         btnShowRequests = new FlatButton("    🔔 Lời mời kết bạn (0)", new Color(245, 247, 250), new Color(100, 100, 100), 0);
         btnShowRequests.setPreferredSize(new Dimension(340, 45));
         btnShowRequests.setHorizontalAlignment(SwingConstants.LEFT);
@@ -123,7 +117,6 @@ public class MainClient extends JFrame {
         btnLogout.setPreferredSize(new Dimension(100, 45));
         btnLogout.addActionListener(e -> logout()); sidebar.add(btnLogout, BorderLayout.SOUTH);
 
-        // Tạo JDialog cho Lời mời
         requestDialog = new JDialog(this, "Lời mời kết bạn", false);
         requestDialog.setSize(350, 400); requestDialog.setLocationRelativeTo(this);
         pnlReqList = new JPanel(); pnlReqList.setLayout(new BoxLayout(pnlReqList, BoxLayout.Y_AXIS)); pnlReqList.setBackground(Color.WHITE);
@@ -131,7 +124,6 @@ public class MainClient extends JFrame {
 
         cardLayout = new CardLayout(); rightPanel = new JPanel(cardLayout);
 
-        // --- CHAT CONTAINER ---
         chatContainer = new JPanel(new BorderLayout());
         JPanel headerPanel = new JPanel(new BorderLayout()); headerPanel.setBackground(Color.WHITE);
         headerPanel.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(230, 230, 230)));
@@ -198,7 +190,6 @@ public class MainClient extends JFrame {
 
         chatContainer.add(headerPanel, BorderLayout.NORTH); chatContainer.add(chatScroll, BorderLayout.CENTER); chatContainer.add(bottomPanel, BorderLayout.SOUTH);
 
-        // --- CALL CONTAINER ---
         callContainer = new JPanel(new GridBagLayout()); callContainer.setBackground(new Color(33, 33, 33));
         GridBagConstraints g = new GridBagConstraints(); g.gridwidth = GridBagConstraints.REMAINDER; g.anchor = GridBagConstraints.CENTER; g.insets = new Insets(10, 10, 10, 10);
 
@@ -229,6 +220,8 @@ public class MainClient extends JFrame {
         btnImg.addActionListener(e -> sendFileOrImage(8));
         btnFile.addActionListener(e -> sendFileOrImage(9));
         btnRecord.addActionListener(e -> toggleRecord());
+
+        // Gắn sự kiện gửi Text
         btnSend.addActionListener(e -> sendText());
         txtChat.addActionListener(e -> sendText());
 
@@ -270,9 +263,7 @@ public class MainClient extends JFrame {
         }
     }
 
-    private void showRequestDialog() {
-        requestDialog.setVisible(true);
-    }
+    private void showRequestDialog() { requestDialog.setVisible(true); }
 
     private void startNetwork() {
         try {
@@ -288,12 +279,19 @@ public class MainClient extends JFrame {
     }
 
     private void sendToServer(String msg) {
-        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("localhost"), 8080)); } catch (Exception e) {}
+        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("192.168.1.62"), 8080)); } catch (Exception e) {}
     }
 
     private void sendP2P(Friend f, byte[] data) {
         if(f == null || f.ip.isEmpty() || f.port == 0) return;
         try { udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName(f.ip), f.port)); } catch (Exception e) {}
+    }
+
+    private Friend getFriendByIp(String ip, int port) {
+        for(Friend f : friends.values()) {
+            if(f.ip.equals(ip)) return f;
+        }
+        return null;
     }
 
     private void listenData() {
@@ -334,18 +332,42 @@ public class MainClient extends JFrame {
         }
     }
 
-    private Friend getFriendByIp(String ip, int port) {
-        for(Friend f : friends.values()) if(f.ip.equals(ip) && f.port == port) return f;
-        return null;
-    }
-
     private void processServerMsg(String s) {
+        // --- XỬ LÝ LỊCH SỬ TIN NHẮN TỪ DATABASE ---
+        if (s.startsWith("MSGDATA;;;")) {
+            String data = s.substring(10);
+            chatPanel.removeAll();
+            if (!data.isEmpty()) {
+                String[] msgs = data.split("\\|\\|");
+                for (String m : msgs) {
+                    if (m.isEmpty()) continue;
+                    int idx = m.indexOf("::");
+                    if(idx != -1) {
+                        String senderUsername = m.substring(0, idx);
+                        String content = m.substring(idx+2);
+                        boolean isMe = senderUsername.equals(currentUser);
+
+                        // Lấy tên hiển thị thay vì username
+                        String senderName = "";
+                        if (!isMe) {
+                            Friend fr = friends.get(senderUsername);
+                            if(fr != null) senderName = fr.name;
+                        }
+                        appendMsg(senderName, content, isMe);
+                    }
+                }
+            }
+            chatPanel.revalidate(); chatPanel.repaint();
+            JScrollBar vertical = ((JScrollPane) chatPanel.getParent().getParent()).getVerticalScrollBar();
+            SwingUtilities.invokeLater(() -> vertical.setValue(vertical.getMaximum()));
+            return;
+        }
+
         if (s.startsWith("DATA;;;")) {
             if (s.equals(lastDataSync)) return;
             lastDataSync = s;
             String[] parts = s.substring(7).split("###");
-            friends.clear();
-            pnlFriendList.removeAll();
+            friends.clear(); pnlFriendList.removeAll();
 
             if (parts.length > 0 && !parts[0].isEmpty()) {
                 for(String f : parts[0].split("\\|")) {
@@ -355,8 +377,7 @@ public class MainClient extends JFrame {
                     friends.put(d[0], friendObj);
 
                     JPanel item = new JPanel(new BorderLayout(10, 0));
-                    item.setBackground(Color.WHITE);
-                    item.setBorder(new EmptyBorder(10, 20, 10, 10));
+                    item.setBackground(Color.WHITE); item.setBorder(new EmptyBorder(10, 20, 10, 10));
                     item.setMaximumSize(new Dimension(Integer.MAX_VALUE, 65));
 
                     RoundAvatar av = new RoundAvatar(friendObj.name.substring(0, 1).toUpperCase());
@@ -374,8 +395,7 @@ public class MainClient extends JFrame {
                     FlatButton btnOptions = new FlatButton("⋮", new Color(0,0,0,0), new Color(150, 150, 150), 15);
                     btnOptions.setFont(new Font("SansSerif", Font.BOLD, 18)); btnOptions.setPreferredSize(new Dimension(30, 30));
 
-                    JPopupMenu friendMenu = new JPopupMenu();
-                    JMenuItem itemUnfriend = new JMenuItem("Xóa kết bạn");
+                    JPopupMenu friendMenu = new JPopupMenu(); JMenuItem itemUnfriend = new JMenuItem("Xóa kết bạn");
                     itemUnfriend.setForeground(new Color(231, 76, 60));
                     itemUnfriend.addActionListener(ev -> {
                         int ans = JOptionPane.showConfirmDialog(this, "Bạn có chắc muốn xóa kết bạn với " + friendObj.name + "?", "Xóa kết bạn", JOptionPane.YES_NO_OPTION);
@@ -387,11 +407,9 @@ public class MainClient extends JFrame {
                                 btnRecord.setEnabled(false); btnImg.setEnabled(false); btnFile.setEnabled(false); btnIcon.setEnabled(false);
                                 chatPanel.removeAll(); chatPanel.revalidate(); chatPanel.repaint();
                             }
-                            friends.remove(friendObj.username);
-                            pnlFriendList.remove(item);
+                            friends.remove(friendObj.username); pnlFriendList.remove(item);
                             pnlFriendList.revalidate(); pnlFriendList.repaint();
-                            lastDataSync = "";
-                            sendToServer("GETDATA;;;" + currentUser);
+                            lastDataSync = ""; sendToServer("GETDATA;;;" + currentUser);
                         }
                     });
                     friendMenu.add(itemUnfriend);
@@ -408,7 +426,11 @@ public class MainClient extends JFrame {
                             lblTargetStatus.setForeground(friendObj.isOnline() ? new Color(46, 204, 113) : new Color(170, 170, 170));
                             txtChat.setEnabled(true); btnSend.setEnabled(true); btnCall.setEnabled(true);
                             btnRecord.setEnabled(true); btnImg.setEnabled(true); btnFile.setEnabled(true); btnIcon.setEnabled(true);
+
+                            // GỬI YÊU CẦU LOAD LỊCH SỬ KHI BẤM VÀO BẠN BÈ
                             chatPanel.removeAll(); chatPanel.revalidate(); chatPanel.repaint();
+                            sendToServer("GETMSG;;;" + currentUser + ";;;" + currentTargetUser);
+
                             for (Component comp : pnlFriendList.getComponents()) comp.setBackground(Color.WHITE);
                             item.setBackground(new Color(240, 245, 255));
                         }
@@ -425,72 +447,52 @@ public class MainClient extends JFrame {
             }
             pnlFriendList.revalidate(); pnlFriendList.repaint();
 
-            pnlReqList.removeAll();
-            int reqCount = 0;
+            pnlReqList.removeAll(); int reqCount = 0;
             if (parts.length > 1 && !parts[1].isEmpty()) {
-                String[] reqs = parts[1].split("\\|");
-                reqCount = reqs.length;
+                String[] reqs = parts[1].split("\\|"); reqCount = reqs.length;
                 for(String r : reqs) {
                     if(r.isEmpty()) continue;
                     String reqUser = r.split(":")[0]; String reqName = r.split(":")[1];
 
-                    JPanel item = new JPanel(new BorderLayout(10, 0));
-                    item.setBackground(Color.WHITE); item.setBorder(new EmptyBorder(10, 15, 10, 15));
-                    item.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
-
-                    RoundAvatar av = new RoundAvatar(reqName.substring(0, 1).toUpperCase());
-                    av.setPreferredSize(new Dimension(40, 40)); av.setBackground(new Color(230, 230, 230)); av.setForeground(Color.DARK_GRAY); av.setFont(new Font("SansSerif", Font.BOLD, 16));
-
+                    JPanel item = new JPanel(new BorderLayout(10, 0)); item.setBackground(Color.WHITE); item.setBorder(new EmptyBorder(10, 15, 10, 15)); item.setMaximumSize(new Dimension(Integer.MAX_VALUE, 60));
+                    RoundAvatar av = new RoundAvatar(reqName.substring(0, 1).toUpperCase()); av.setPreferredSize(new Dimension(40, 40)); av.setBackground(new Color(230, 230, 230)); av.setForeground(Color.DARK_GRAY); av.setFont(new Font("SansSerif", Font.BOLD, 16));
                     JLabel nameLbl = new JLabel(reqName); nameLbl.setFont(new Font("SansSerif", Font.BOLD, 14));
 
                     JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0)); actions.setOpaque(false);
-                    FlatButton btnAcc = new FlatButton("✓", new Color(46, 204, 113), Color.WHITE, 10);
-                    FlatButton btnDec = new FlatButton("✗", new Color(231, 76, 60), Color.WHITE, 10);
+                    FlatButton btnAcc = new FlatButton("✓", new Color(46, 204, 113), Color.WHITE, 10); FlatButton btnDec = new FlatButton("✗", new Color(231, 76, 60), Color.WHITE, 10);
                     btnAcc.setPreferredSize(new Dimension(35, 30)); btnDec.setPreferredSize(new Dimension(35, 30));
-
                     btnAcc.addActionListener(e -> { sendToServer("ACCEPT;;;" + reqUser + ";;;" + currentUser); lastDataSync = ""; });
                     btnDec.addActionListener(e -> { sendToServer("DECLINE;;;" + reqUser + ";;;" + currentUser); lastDataSync = ""; });
-
                     actions.add(btnAcc); actions.add(btnDec);
                     item.add(av, BorderLayout.WEST); item.add(nameLbl, BorderLayout.CENTER); item.add(actions, BorderLayout.EAST);
                     pnlReqList.add(item);
                 }
             }
-            if (reqCount > 0) {
-                btnShowRequests.setText("    🔔 Lời mời kết bạn (" + reqCount + ")");
-                btnShowRequests.setForeground(new Color(232, 65, 24));
-            } else {
-                btnShowRequests.setText("    Lời mời kết bạn (0)");
-                btnShowRequests.setForeground(new Color(100, 100, 100));
-                requestDialog.setVisible(false);
-            }
+            if (reqCount > 0) { btnShowRequests.setText("    🔔 Lời mời kết bạn (" + reqCount + ")"); btnShowRequests.setForeground(new Color(232, 65, 24)); }
+            else { btnShowRequests.setText("    Lời mời kết bạn (0)"); btnShowRequests.setForeground(new Color(100, 100, 100)); requestDialog.setVisible(false); }
             pnlReqList.revalidate(); pnlReqList.repaint();
 
         } else if (s.startsWith("SEARCHRES;;;")) {
             String[] p = s.split(";;;");
             if (p.length == 3 && JOptionPane.showConfirmDialog(this, "Tìm thấy: " + p[2] + "\nBạn có muốn gửi lời mời?", "Kết bạn", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
-                sendToServer("ADD;;;" + currentUser + ";;;" + p[1]);
-                JOptionPane.showMessageDialog(this, "Đã gửi lời mời tới " + p[2]);
+                sendToServer("ADD;;;" + currentUser + ";;;" + p[1]); JOptionPane.showMessageDialog(this, "Đã gửi lời mời tới " + p[2]);
             }
         } else if (s.equals("NOTFOUND")) { JOptionPane.showMessageDialog(this, "Không tìm thấy người dùng này!"); }
     }
 
     private void initiateCall() {
-        if (currentTargetUser == null) return;
-        Friend f = friends.get(currentTargetUser);
+        if (currentTargetUser == null) return; Friend f = friends.get(currentTargetUser);
         if (f == null || !f.isOnline()) { JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!"); return; }
         currentCallUser = currentTargetUser; sendP2P(f, new byte[]{4});
         lblCallAvatar.setAvatarText(f.name.substring(0, 1).toUpperCase()); lblCallName.setText(f.name); lblCallStatus.setText("Đang đổ chuông...");
-        btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true);
-        cardLayout.show(rightPanel, "CALL");
+        btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true); cardLayout.show(rightPanel, "CALL");
     }
 
     private void handleIncomingCall(String callerUsername) {
         if (currentCallUser != null) { sendP2P(friends.get(callerUsername), new byte[]{6}); return; }
         currentCallUser = callerUsername; Friend f = friends.get(currentCallUser); if (f == null) return;
         lblCallAvatar.setAvatarText(f.name.substring(0, 1).toUpperCase()); lblCallName.setText(f.name); lblCallStatus.setText("Cuộc gọi đến...");
-        btnAcceptCall.setVisible(true); btnDeclineCall.setVisible(true); btnEndCall.setVisible(false);
-        cardLayout.show(rightPanel, "CALL");
+        btnAcceptCall.setVisible(true); btnDeclineCall.setVisible(true); btnEndCall.setVisible(false); cardLayout.show(rightPanel, "CALL");
     }
 
     private void acceptCall() {
@@ -515,8 +517,7 @@ public class MainClient extends JFrame {
             new Thread(() -> {
                 try {
                     byte[] audioBuffer = new byte[1024]; byte[] packetData = new byte[1025]; packetData[0] = 0;
-                    Friend f = friends.get(currentCallUser); if (f == null) return;
-                    InetAddress addr = InetAddress.getByName(f.ip); int targetPort = f.port;
+                    Friend f = friends.get(currentCallUser); if (f == null) return; InetAddress addr = InetAddress.getByName(f.ip); int targetPort = f.port;
                     while (isCalling && currentCallUser != null) {
                         int read = mic.read(audioBuffer, 0, audioBuffer.length);
                         if (read > 0) { System.arraycopy(audioBuffer, 0, packetData, 1, read); udpSocket.send(new DatagramPacket(packetData, packetData.length, addr, targetPort)); }
@@ -533,11 +534,9 @@ public class MainClient extends JFrame {
             try {
                 InetAddress addr = InetAddress.getByName(f.ip); long msgId = System.currentTimeMillis(); int offset = 0;
                 while (offset < fullData.length) {
-                    int length = Math.min(50000, fullData.length - offset);
-                    ByteBuffer bb = ByteBuffer.allocate(17 + length);
+                    int length = Math.min(50000, fullData.length - offset); ByteBuffer bb = ByteBuffer.allocate(17 + length);
                     bb.put(type); bb.putLong(msgId); bb.putInt(fullData.length); bb.putInt(offset); bb.put(fullData, offset, length);
-                    udpSocket.send(new DatagramPacket(bb.array(), bb.array().length, addr, f.port));
-                    offset += length; Thread.sleep(15);
+                    udpSocket.send(new DatagramPacket(bb.array(), bb.array().length, addr, f.port)); offset += length; Thread.sleep(15);
                 }
             } catch (Exception e) {}
         }).start();
@@ -568,10 +567,8 @@ public class MainClient extends JFrame {
 
         if (!isRecording) {
             try {
-                AudioFormat format = new AudioFormat(8000.0f, 16, 1, true, false);
-                recordMic = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, format));
-                recordMic.open(format); recordMic.start();
-                isRecording = true; currentRecordStream = new ByteArrayOutputStream();
+                AudioFormat format = new AudioFormat(8000.0f, 16, 1, true, false); recordMic = (TargetDataLine) AudioSystem.getLine(new DataLine.Info(TargetDataLine.class, format));
+                recordMic.open(format); recordMic.start(); isRecording = true; currentRecordStream = new ByteArrayOutputStream();
                 btnRecord.setForeground(new Color(231, 76, 60));
                 new Thread(() -> {
                     byte[] buffer = new byte[1024];
@@ -580,8 +577,7 @@ public class MainClient extends JFrame {
                 }).start();
             } catch (Exception e) {}
         } else {
-            isRecording = false; btnRecord.setForeground(new Color(120, 120, 120));
-            byte[] audioData = currentRecordStream.toByteArray();
+            isRecording = false; btnRecord.setForeground(new Color(120, 120, 120)); byte[] audioData = currentRecordStream.toByteArray();
             appendAudioMsg("", audioData, true); sendFragmentedData(f, (byte)3, audioData);
         }
     }
@@ -590,10 +586,15 @@ public class MainClient extends JFrame {
         if(currentTargetUser == null || txtChat.getText().trim().isEmpty()) return; Friend f = friends.get(currentTargetUser);
         if(f != null && f.isOnline()) {
             try {
-                byte[] textBytes = txtChat.getText().trim().getBytes("UTF-8"); byte[] packetData = new byte[textBytes.length + 1]; packetData[0] = 1;
+                String messageContent = txtChat.getText().trim();
+                byte[] textBytes = messageContent.getBytes("UTF-8"); byte[] packetData = new byte[textBytes.length + 1]; packetData[0] = 1;
                 System.arraycopy(textBytes, 0, packetData, 1, textBytes.length);
-                udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port));
-                appendMsg("", txtChat.getText().trim(), true); txtChat.setText("");
+                udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port)); // Bắn P2P
+
+                // GỬI BẢN SAO CHO MÁY CHỦ ĐỂ LƯU VÀO DATABASE
+                sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;" + messageContent);
+
+                appendMsg("", messageContent, true); txtChat.setText("");
             } catch (Exception e) {}
         } else JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
     }
@@ -657,7 +658,7 @@ public class MainClient extends JFrame {
     private void logout() {
         isRunning = false; closeCallUI(); isRecording = false;
         if(timer != null) timer.stop(); if(udpSocket != null) udpSocket.close(); if(recordMic != null) recordMic.close(); if(speaker != null) speaker.close();
-        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("localhost"), 8080)); } catch(Exception e) {}
+        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("192.168.1.62"), 8080)); } catch(Exception e) {}
         new LoginClient().setVisible(true); this.dispose();
     }
 }
