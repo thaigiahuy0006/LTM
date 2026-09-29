@@ -279,7 +279,7 @@ public class MainClient extends JFrame {
     }
 
     private void sendToServer(String msg) {
-        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("192.168.1.62"), 8080)); } catch (Exception e) {}
+        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("172.26.52.71"), 8080)); } catch (Exception e) {}
     }
 
     private void sendP2P(Friend f, byte[] data) {
@@ -658,7 +658,7 @@ public class MainClient extends JFrame {
     private void logout() {
         isRunning = false; closeCallUI(); isRecording = false;
         if(timer != null) timer.stop(); if(udpSocket != null) udpSocket.close(); if(recordMic != null) recordMic.close(); if(speaker != null) speaker.close();
-        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("192.168.1.62"), 8080)); } catch(Exception e) {}
+        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("172.26.52.71"), 8080)); } catch(Exception e) {}
         new LoginClient().setVisible(true); this.dispose();
     }
 }

@@ -245,7 +245,7 @@ public class LoginClient extends JFrame {
         try (DatagramSocket socket = new DatagramSocket()) {
             String request = "LOGIN;;;" + txtLoginUser.getText().trim() + ";;;" + new String(txtLoginPass.getPassword());
             byte[] sendData = request.getBytes("UTF-8");
-            socket.send(new DatagramPacket(sendData, sendData.length, InetAddress.getByName("192.168.1.62"), 8080));
+            socket.send(new DatagramPacket(sendData, sendData.length, InetAddress.getByName("172.26.52.71"), 8080));
 
             byte[] receiveData = new byte[65507];
             DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
@@ -284,7 +284,7 @@ public class LoginClient extends JFrame {
         try (DatagramSocket socket = new DatagramSocket()) {
             String req = "REGISTER;;;" + user + ";;;" + pass + ";;;" + name + ";;;" + txtRegEmail.getText().trim() + ";;;" + phone + ";;;" + cbRegGender.getSelectedItem();
             byte[] sendData = req.getBytes("UTF-8");
-            socket.send(new DatagramPacket(sendData, sendData.length, InetAddress.getByName("localhost"), 8080));
+            socket.send(new DatagramPacket(sendData, sendData.length, InetAddress.getByName("172.26.52.71"), 8080));
 
             byte[] receiveData = new byte[1024];
             DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
