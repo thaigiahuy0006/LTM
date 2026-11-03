@@ -6,6 +6,8 @@ import com.heal.doan_ltm.models.Friend;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
@@ -19,6 +21,7 @@ import javax.imageio.ImageIO;
 import javax.swing.Timer;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
+import com.github.sarxos.webcam.Webcam;
 
 public class MainClient extends JFrame {
 
@@ -28,7 +31,7 @@ public class MainClient extends JFrame {
     }
 
     private String currentUser, currentFullname, currentAvatarBase64, currentTargetUser, currentCallUser;
-    private RoundAvatar avatarLabel, lblCallAvatar;
+    private RoundAvatar avatarLabel;
     private JLabel nameLabel, lblTarget, lblTargetStatus;
     private JTextField txtChat;
     private JPanel chatPanel;
@@ -38,9 +41,15 @@ public class MainClient extends JFrame {
     private JDialog requestDialog;
 
     private CardLayout cardLayout;
-    private JPanel rightPanel, chatContainer, callContainer;
+    private JPanel rightPanel, chatContainer;
+    private JLayeredPane callContainer;
+
+    // UI CHO GIAO DIỆN CALL MỚI (STYLE ZALO)
+    private VideoPanel pnlTargetVideo;
+    private JLabel lblMyVideo;
     private JLabel lblCallName, lblCallStatus;
     private FlatButton btnAcceptCall, btnDeclineCall, btnEndCall;
+    private JPanel bottomCallPanel;
 
     private DatagramSocket udpSocket;
     private TargetDataLine mic, recordMic;
@@ -52,6 +61,10 @@ public class MainClient extends JFrame {
     private Timer timer;
     private Map<String, Friend> friends = new HashMap<>();
     private String lastDataSync = "";
+
+    private Webcam webcam;
+    private volatile boolean isVideoOn = false;
+    private FlatButton btnToggleVideo;
 
     private Map<Long, byte[]> incomingData = new HashMap<>();
     private Map<Long, Integer> incomingDataReceived = new HashMap<>();
@@ -148,8 +161,8 @@ public class MainClient extends JFrame {
         chatScroll.getVerticalScrollBar().setUnitIncrement(16);
         chatScroll.getVerticalScrollBar().setPreferredSize(new Dimension(8, 0));
 
-        JPanel bottomPanel = new JPanel(new BorderLayout());
-        bottomPanel.setBackground(new Color(244, 245, 247)); bottomPanel.setBorder(new EmptyBorder(15, 20, 20, 20));
+        JPanel chatBottomPanel = new JPanel(new BorderLayout());
+        chatBottomPanel.setBackground(new Color(244, 245, 247)); chatBottomPanel.setBorder(new EmptyBorder(15, 20, 20, 20));
 
         RoundedPanel inputBg = new RoundedPanel(25, Color.WHITE);
         inputBg.setLayout(new BorderLayout(5, 5)); inputBg.setBorder(new EmptyBorder(5, 15, 5, 5));
@@ -186,29 +199,98 @@ public class MainClient extends JFrame {
         btnIcon.addActionListener(e -> emojiMenu.show(btnIcon, 0, -emojiMenu.getPreferredSize().height));
 
         inputBg.add(txtChat, BorderLayout.CENTER); inputBg.add(pnlChatActions, BorderLayout.EAST);
-        bottomPanel.add(inputBg, BorderLayout.CENTER);
+        chatBottomPanel.add(inputBg, BorderLayout.CENTER);
 
-        chatContainer.add(headerPanel, BorderLayout.NORTH); chatContainer.add(chatScroll, BorderLayout.CENTER); chatContainer.add(bottomPanel, BorderLayout.SOUTH);
+        chatContainer.add(headerPanel, BorderLayout.NORTH); chatContainer.add(chatScroll, BorderLayout.CENTER); chatContainer.add(chatBottomPanel, BorderLayout.SOUTH);
 
-        callContainer = new JPanel(new GridBagLayout()); callContainer.setBackground(new Color(33, 33, 33));
-        GridBagConstraints g = new GridBagConstraints(); g.gridwidth = GridBagConstraints.REMAINDER; g.anchor = GridBagConstraints.CENTER; g.insets = new Insets(10, 10, 10, 10);
+        // ==========================================
+        // THIẾT KẾ KHỐI CALL THEO STYLE ZALO (LAYERED)
+        // ==========================================
+        callContainer = new JLayeredPane();
+        callContainer.setOpaque(true);
+        callContainer.setBackground(new Color(33, 33, 33));
 
-        lblCallAvatar = new RoundAvatar("?"); lblCallAvatar.setFont(new Font("SansSerif", Font.BOLD, 60));
-        lblCallAvatar.setBackground(new Color(0, 104, 255)); lblCallAvatar.setForeground(Color.WHITE);
-        lblCallAvatar.setPreferredSize(new Dimension(150, 150)); lblCallAvatar.setMaximumSize(new Dimension(150, 150));
+        // 1. Layer Nền: Video của đối phương tràn viền
+        pnlTargetVideo = new VideoPanel();
 
-        lblCallName = new JLabel("Tên người gọi"); lblCallName.setFont(new Font("SansSerif", Font.BOLD, 30)); lblCallName.setForeground(Color.WHITE);
-        lblCallStatus = new JLabel("Đang gọi..."); lblCallStatus.setFont(new Font("SansSerif", Font.PLAIN, 18)); lblCallStatus.setForeground(new Color(180, 180, 180));
+        // 2. Layer Góc: Video của mình (Camera local)
+        lblMyVideo = new JLabel();
+        lblMyVideo.setOpaque(true);
+        lblMyVideo.setBackground(Color.BLACK);
+        lblMyVideo.setBorder(BorderFactory.createLineBorder(Color.GRAY, 2));
+        lblMyVideo.setVisible(false);
 
-        JPanel callActionPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 40, 20)); callActionPanel.setOpaque(false);
-        btnAcceptCall = new FlatButton("Nhấc máy", new Color(46, 204, 113), Color.WHITE, 25); btnAcceptCall.setPreferredSize(new Dimension(130, 50));
-        btnDeclineCall = new FlatButton("Từ chối", new Color(231, 76, 60), Color.WHITE, 25); btnDeclineCall.setPreferredSize(new Dimension(130, 50));
-        btnEndCall = new FlatButton("Kết thúc", new Color(231, 76, 60), Color.WHITE, 25); btnEndCall.setPreferredSize(new Dimension(130, 50));
+        // 3. Layer Đáy: Tên, Trạng thái, và Các nút điều khiển
+        bottomCallPanel = new JPanel();
+        bottomCallPanel.setLayout(new BoxLayout(bottomCallPanel, BoxLayout.Y_AXIS));
+        bottomCallPanel.setOpaque(false); // Trong suốt để thấy nền video
 
-        callActionPanel.add(btnAcceptCall); callActionPanel.add(btnDeclineCall); callActionPanel.add(btnEndCall);
-        callContainer.add(lblCallAvatar, g); callContainer.add(lblCallName, g); callContainer.add(lblCallStatus, g); callContainer.add(callActionPanel, g);
+        lblCallName = new JLabel("Tên người gọi");
+        lblCallName.setFont(new Font("SansSerif", Font.BOLD, 30));
+        lblCallName.setForeground(Color.WHITE);
+        lblCallName.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-        rightPanel.add(chatContainer, "CHAT"); rightPanel.add(callContainer, "CALL");
+        lblCallStatus = new JLabel("Đang gọi...");
+        lblCallStatus.setFont(new Font("SansSerif", Font.PLAIN, 18));
+        lblCallStatus.setForeground(new Color(200, 200, 200));
+        lblCallStatus.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JPanel callActionPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 30, 20));
+        callActionPanel.setOpaque(false);
+
+        btnAcceptCall = new FlatButton("Nhấc máy", new Color(46, 204, 113), Color.WHITE, 25);
+        btnAcceptCall.setPreferredSize(new Dimension(130, 50));
+
+        btnDeclineCall = new FlatButton("Từ chối", new Color(231, 76, 60), Color.WHITE, 25);
+        btnDeclineCall.setPreferredSize(new Dimension(130, 50));
+
+        btnEndCall = new FlatButton("Kết thúc", new Color(231, 76, 60), Color.WHITE, 25);
+        btnEndCall.setPreferredSize(new Dimension(130, 50));
+
+        btnToggleVideo = new FlatButton("📷 Bật Cam", new Color(52, 152, 219), Color.WHITE, 25);
+        btnToggleVideo.setPreferredSize(new Dimension(130, 50));
+        btnToggleVideo.setVisible(false);
+        btnToggleVideo.addActionListener(e -> toggleVideo());
+
+        callActionPanel.add(btnAcceptCall);
+        callActionPanel.add(btnDeclineCall);
+        callActionPanel.add(btnToggleVideo);
+        callActionPanel.add(btnEndCall);
+
+        bottomCallPanel.add(lblCallName);
+        bottomCallPanel.add(Box.createVerticalStrut(10));
+        bottomCallPanel.add(lblCallStatus);
+        bottomCallPanel.add(Box.createVerticalStrut(20));
+        bottomCallPanel.add(callActionPanel);
+
+        // Nạp các Layer vào đúng vị trí
+        callContainer.add(pnlTargetVideo, JLayeredPane.DEFAULT_LAYER);
+        callContainer.add(lblMyVideo, JLayeredPane.PALETTE_LAYER);
+        callContainer.add(bottomCallPanel, JLayeredPane.PALETTE_LAYER);
+
+        // Sự kiện tự động co giãn các thành phần khi cửa sổ thay đổi kích thước
+        callContainer.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                int w = callContainer.getWidth();
+                int h = callContainer.getHeight();
+
+                // Video nền phủ kín toàn bộ
+                pnlTargetVideo.setBounds(0, 0, w, h);
+
+                // Video của mình nằm ở góc trên cùng bên phải
+                int myVidWidth = 160;
+                int myVidHeight = 120;
+                lblMyVideo.setBounds(w - myVidWidth - 20, 20, myVidWidth, myVidHeight);
+
+                // Panel điều khiển nằm ở đáy màn hình
+                int bottomHeight = 180;
+                bottomCallPanel.setBounds(0, h - bottomHeight, w, bottomHeight);
+            }
+        });
+
+        rightPanel.add(chatContainer, "CHAT");
+        rightPanel.add(callContainer, "CALL");
 
         add(sidebar, BorderLayout.WEST); add(rightPanel, BorderLayout.CENTER);
 
@@ -220,8 +302,6 @@ public class MainClient extends JFrame {
         btnImg.addActionListener(e -> sendFileOrImage(8));
         btnFile.addActionListener(e -> sendFileOrImage(9));
         btnRecord.addActionListener(e -> toggleRecord());
-
-        // Gắn sự kiện gửi Text
         btnSend.addActionListener(e -> sendText());
         txtChat.addActionListener(e -> sendText());
 
@@ -279,7 +359,7 @@ public class MainClient extends JFrame {
     }
 
     private void sendToServer(String msg) {
-        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("172.26.52.71"), 8080)); } catch (Exception e) {}
+        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("localhost"), 8080)); } catch (Exception e) {}
     }
 
     private void sendP2P(Friend f, byte[] data) {
@@ -304,26 +384,50 @@ public class MainClient extends JFrame {
                     String s = new String(buffer, 0, packet.getLength(), "UTF-8");
                     SwingUtilities.invokeLater(() -> processServerMsg(s));
                 } else {
-                    int type = buffer[0]; Friend senderF = getFriendByIp(packet.getAddress().getHostAddress(), packet.getPort());
+                    int type = buffer[0];
+                    Friend senderF = getFriendByIp(packet.getAddress().getHostAddress(), packet.getPort());
 
-                    if (type == 0 && isCalling && speaker != null) speaker.write(buffer, 1, packet.getLength() - 1);
+                    if (type == 0 && isCalling && speaker != null) {
+                        speaker.write(buffer, 1, packet.getLength() - 1);
+                    }
+                    else if (type == 10 && isCalling) {
+                        byte[] imgBytes = new byte[packet.getLength() - 1];
+                        System.arraycopy(buffer, 1, imgBytes, 0, imgBytes.length);
+                        SwingUtilities.invokeLater(() -> {
+                            try {
+                                BufferedImage img = ImageIO.read(new ByteArrayInputStream(imgBytes));
+                                pnlTargetVideo.setFrame(img); // Hiển thị hình ảnh đối phương đè lên Avatar nền
+                            } catch (Exception e) {}
+                        });
+                    }
                     else if (type == 1 && senderF != null) {
                         String text = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
-                        SwingUtilities.invokeLater(() -> appendMsg(senderF.name, text, false));
-                    } else if ((type == 3 || type == 8 || type == 9) && senderF != null) {
+                        SwingUtilities.invokeLater(() -> {
+                            if (currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
+                                appendMsg(senderF.name, text, false);
+                            }
+                        });
+                    }
+                    else if ((type == 3 || type == 8 || type == 9) && senderF != null) {
                         ByteBuffer bb = ByteBuffer.wrap(buffer, 1, packet.getLength() - 1);
                         long id = bb.getLong(); int total = bb.getInt(); int offset = bb.getInt(); int dataLen = packet.getLength() - 17;
                         if (!incomingData.containsKey(id)) { incomingData.put(id, new byte[total]); incomingDataReceived.put(id, 0); }
                         byte[] fullData = incomingData.get(id); System.arraycopy(buffer, 17, fullData, offset, dataLen);
                         int received = incomingDataReceived.get(id) + dataLen; incomingDataReceived.put(id, received);
+
                         if (received >= total) {
                             byte[] finalData = fullData.clone();
-                            if(type == 3) SwingUtilities.invokeLater(() -> appendAudioMsg(senderF.name, finalData, false));
-                            else if(type == 8) SwingUtilities.invokeLater(() -> appendImageMsg(senderF.name, finalData, false));
-                            else if(type == 9) SwingUtilities.invokeLater(() -> appendFileMsg(senderF.name, finalData, false));
+                            SwingUtilities.invokeLater(() -> {
+                                if (currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
+                                    if(type == 3) appendAudioMsg(senderF.name, finalData, false);
+                                    else if(type == 8) appendImageMsg(senderF.name, finalData, false);
+                                    else if(type == 9) appendFileMsg(senderF.name, finalData, false);
+                                }
+                            });
                             incomingData.remove(id); incomingDataReceived.remove(id);
                         }
-                    } else if (type == 4 && senderF != null) SwingUtilities.invokeLater(() -> handleIncomingCall(senderF.username));
+                    }
+                    else if (type == 4 && senderF != null) SwingUtilities.invokeLater(() -> handleIncomingCall(senderF.username));
                     else if (type == 5) SwingUtilities.invokeLater(() -> handleCallAccepted());
                     else if (type == 6) SwingUtilities.invokeLater(() -> handleCallDeclined());
                     else if (type == 7) SwingUtilities.invokeLater(() -> handleCallEnded());
@@ -333,7 +437,6 @@ public class MainClient extends JFrame {
     }
 
     private void processServerMsg(String s) {
-        // --- XỬ LÝ LỊCH SỬ TIN NHẮN TỪ DATABASE ---
         if (s.startsWith("MSGDATA;;;")) {
             String data = s.substring(10);
             chatPanel.removeAll();
@@ -347,7 +450,6 @@ public class MainClient extends JFrame {
                         String content = m.substring(idx+2);
                         boolean isMe = senderUsername.equals(currentUser);
 
-                        // Lấy tên hiển thị thay vì username
                         String senderName = "";
                         if (!isMe) {
                             Friend fr = friends.get(senderUsername);
@@ -427,7 +529,6 @@ public class MainClient extends JFrame {
                             txtChat.setEnabled(true); btnSend.setEnabled(true); btnCall.setEnabled(true);
                             btnRecord.setEnabled(true); btnImg.setEnabled(true); btnFile.setEnabled(true); btnIcon.setEnabled(true);
 
-                            // GỬI YÊU CẦU LOAD LỊCH SỬ KHI BẤM VÀO BẠN BÈ
                             chatPanel.removeAll(); chatPanel.revalidate(); chatPanel.repaint();
                             sendToServer("GETMSG;;;" + currentUser + ";;;" + currentTargetUser);
 
@@ -484,29 +585,45 @@ public class MainClient extends JFrame {
         if (currentTargetUser == null) return; Friend f = friends.get(currentTargetUser);
         if (f == null || !f.isOnline()) { JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!"); return; }
         currentCallUser = currentTargetUser; sendP2P(f, new byte[]{4});
-        lblCallAvatar.setAvatarText(f.name.substring(0, 1).toUpperCase()); lblCallName.setText(f.name); lblCallStatus.setText("Đang đổ chuông...");
+
+        pnlTargetVideo.setAvatarText(f.name.substring(0, 1).toUpperCase());
+        pnlTargetVideo.setFrame(null); // Reset màn hình đen có avatar
+
+        lblCallName.setText(f.name); lblCallStatus.setText("Đang đổ chuông...");
         btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true); cardLayout.show(rightPanel, "CALL");
     }
 
     private void handleIncomingCall(String callerUsername) {
         if (currentCallUser != null) { sendP2P(friends.get(callerUsername), new byte[]{6}); return; }
         currentCallUser = callerUsername; Friend f = friends.get(currentCallUser); if (f == null) return;
-        lblCallAvatar.setAvatarText(f.name.substring(0, 1).toUpperCase()); lblCallName.setText(f.name); lblCallStatus.setText("Cuộc gọi đến...");
+
+        pnlTargetVideo.setAvatarText(f.name.substring(0, 1).toUpperCase());
+        pnlTargetVideo.setFrame(null);
+
+        lblCallName.setText(f.name); lblCallStatus.setText("Cuộc gọi đến...");
         btnAcceptCall.setVisible(true); btnDeclineCall.setVisible(true); btnEndCall.setVisible(false); cardLayout.show(rightPanel, "CALL");
     }
 
     private void acceptCall() {
         if (currentCallUser == null) return; sendP2P(friends.get(currentCallUser), new byte[]{5});
-        lblCallStatus.setText("Đang trò chuyện"); btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true); startAudioStreams();
+        lblCallStatus.setText("Đang trò chuyện"); btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true); startAudioStreams(); btnToggleVideo.setVisible(true);
     }
 
-    private void handleCallAccepted() { lblCallStatus.setText("Đang trò chuyện"); startAudioStreams(); }
+    private void handleCallAccepted() { lblCallStatus.setText("Đang trò chuyện"); startAudioStreams(); btnToggleVideo.setVisible(true); }
     private void declineCall() { if (currentCallUser == null) return; sendP2P(friends.get(currentCallUser), new byte[]{6}); closeCallUI(); }
     private void handleCallDeclined() { JOptionPane.showMessageDialog(this, "Người dùng đã từ chối cuộc gọi"); closeCallUI(); }
     private void endCall() { if (currentCallUser == null) return; sendP2P(friends.get(currentCallUser), new byte[]{7}); closeCallUI(); }
+
     private void handleCallEnded() { closeCallUI(); }
 
-    private void closeCallUI() { currentCallUser = null; stopAudioStreams(); cardLayout.show(rightPanel, "CHAT"); }
+    private void closeCallUI() {
+        currentCallUser = null;
+        stopAudioStreams();
+        stopVideo();
+        btnToggleVideo.setVisible(false);
+        pnlTargetVideo.setFrame(null); // Tắt hình đối phương
+        cardLayout.show(rightPanel, "CHAT");
+    }
 
     private void startAudioStreams() {
         if (isCalling) return;
@@ -589,9 +706,8 @@ public class MainClient extends JFrame {
                 String messageContent = txtChat.getText().trim();
                 byte[] textBytes = messageContent.getBytes("UTF-8"); byte[] packetData = new byte[textBytes.length + 1]; packetData[0] = 1;
                 System.arraycopy(textBytes, 0, packetData, 1, textBytes.length);
-                udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port)); // Bắn P2P
+                udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port));
 
-                // GỬI BẢN SAO CHO MÁY CHỦ ĐỂ LƯU VÀO DATABASE
                 sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;" + messageContent);
 
                 appendMsg("", messageContent, true); txtChat.setText("");
@@ -631,6 +747,7 @@ public class MainClient extends JFrame {
         try {
             ByteBuffer bb = ByteBuffer.wrap(payload); int nameLen = bb.getInt(); byte[] nameBytes = new byte[nameLen]; bb.get(nameBytes);
             String fileName = new String(nameBytes, "UTF-8"); byte[] fileData = new byte[payload.length - 4 - nameLen]; bb.get(fileData);
+
             FlatButton btn = new FlatButton("⬇ " + fileName, isMe ? new Color(0, 104, 255) : Color.WHITE, isMe ? Color.WHITE : new Color(30, 30, 30), 10);
             btn.setFont(new Font("SansSerif", Font.PLAIN, 14));
             btn.addActionListener(e -> {
@@ -658,7 +775,124 @@ public class MainClient extends JFrame {
     private void logout() {
         isRunning = false; closeCallUI(); isRecording = false;
         if(timer != null) timer.stop(); if(udpSocket != null) udpSocket.close(); if(recordMic != null) recordMic.close(); if(speaker != null) speaker.close();
-        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("172.26.52.71"), 8080)); } catch(Exception e) {}
+        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("localhost"), 8080)); } catch(Exception e) {}
         new LoginClient().setVisible(true); this.dispose();
+    }
+
+    private void toggleVideo() {
+        if (!isVideoOn) {
+            startVideo();
+            btnToggleVideo.setText("🚫 Tắt Cam");
+            btnToggleVideo.setBackground(new Color(231, 76, 60));
+        } else {
+            stopVideo();
+            btnToggleVideo.setText("📷 Bật Cam");
+            btnToggleVideo.setBackground(new Color(52, 152, 219));
+        }
+    }
+
+    private void startVideo() {
+        if (webcam == null) {
+            webcam = Webcam.getDefault();
+            if (webcam != null) {
+                webcam.setViewSize(new Dimension(320, 240));
+                webcam.open();
+            } else {
+                JOptionPane.showMessageDialog(this, "Không tìm thấy Camera trên thiết bị!");
+                return;
+            }
+        }
+        isVideoOn = true;
+        lblMyVideo.setVisible(true);
+        new Thread(() -> {
+            try {
+                Friend f = friends.get(currentCallUser);
+                if (f == null) return;
+                InetAddress addr = InetAddress.getByName(f.ip);
+                int targetPort = f.port;
+
+                while (isVideoOn && currentCallUser != null && webcam.isOpen()) {
+                    BufferedImage image = webcam.getImage();
+                    if (image != null) {
+                        // 1. Cập nhật Cam của mình lên khung nhỏ ở góc phải
+                        SwingUtilities.invokeLater(() -> {
+                            Image scaled = image.getScaledInstance(160, 120, Image.SCALE_SMOOTH);
+                            lblMyVideo.setIcon(new ImageIcon(scaled));
+                        });
+
+                        // 2. Gửi cho đối phương
+                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                        ImageIO.write(image, "jpg", baos);
+                        byte[] imgBytes = baos.toByteArray();
+
+                        if (imgBytes.length < 60000) {
+                            byte[] packetData = new byte[imgBytes.length + 1];
+                            packetData[0] = 10;
+                            System.arraycopy(imgBytes, 0, packetData, 1, imgBytes.length);
+                            udpSocket.send(new DatagramPacket(packetData, packetData.length, addr, targetPort));
+                        }
+                    }
+                    Thread.sleep(60); // Duy trì FPS ổn định
+                }
+            } catch (Exception e) {}
+        }).start();
+    }
+
+    private void stopVideo() {
+        isVideoOn = false;
+        lblMyVideo.setVisible(false);
+        lblMyVideo.setIcon(null);
+        if (webcam != null && webcam.isOpen()) {
+            webcam.close();
+            webcam = null;
+        }
+    }
+
+    // ==========================================
+    // CLASS BỔ TRỢ: KHUNG VẼ VIDEO TRÀN VIỀN
+    // ==========================================
+    class VideoPanel extends JPanel {
+        private BufferedImage frame;
+        private String avatarText = "?";
+
+        public VideoPanel() {
+            setOpaque(true);
+            setBackground(new Color(20, 20, 20)); // Nền đen khi chưa bật video
+        }
+
+        public void setFrame(BufferedImage img) {
+            this.frame = img;
+            repaint();
+        }
+
+        public void setAvatarText(String t) {
+            this.avatarText = t;
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+            if (frame != null) {
+                // Nếu đối phương bật Cam, vẽ hình video tràn viền
+                g.drawImage(frame, 0, 0, getWidth(), getHeight(), null);
+            } else {
+                // Nếu chưa bật Cam, vẽ hình tròn Avatar ở chính giữa
+                Graphics2D g2 = (Graphics2D) g;
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setColor(new Color(0, 104, 255));
+                int size = 180;
+                int x = (getWidth() - size) / 2;
+                int y = (getHeight() - size) / 2 - 40; // Đẩy lên một chút cho cân đối
+                g2.fillOval(x, y, size, size);
+
+                g2.setColor(Color.WHITE);
+                g2.setFont(new Font("SansSerif", Font.BOLD, 70));
+                FontMetrics fm = g2.getFontMetrics();
+                int tw = fm.stringWidth(avatarText);
+                int th = fm.getAscent();
+                g2.drawString(avatarText, x + (size - tw)/2, y + (size + th)/2 - fm.getDescent());
+            }
+        }
     }
 }
