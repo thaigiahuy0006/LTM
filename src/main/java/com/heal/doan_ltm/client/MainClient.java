@@ -6,8 +6,6 @@ import com.heal.doan_ltm.models.Friend;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
-import java.awt.event.ComponentAdapter;
-import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
@@ -206,24 +204,40 @@ public class MainClient extends JFrame {
         // ==========================================
         // THIẾT KẾ KHỐI CALL THEO STYLE ZALO (LAYERED)
         // ==========================================
-        callContainer = new JLayeredPane();
+        callContainer = new JLayeredPane() {
+            @Override
+            public void doLayout() {
+                super.doLayout();
+                int w = getWidth();
+                int h = getHeight();
+
+                // Ép kích thước Video nền phủ kín toàn bộ
+                if (pnlTargetVideo != null) pnlTargetVideo.setBounds(0, 0, w, h);
+
+                // Ép kích thước Video của mình nằm góc phải
+                if (lblMyVideo != null) lblMyVideo.setBounds(w - 180, 20, 160, 120);
+
+                // Ép kích thước Panel điều khiển ở đáy màn hình
+                if (bottomCallPanel != null) bottomCallPanel.setBounds(0, h - 200, w, 200);
+            }
+        };
         callContainer.setOpaque(true);
         callContainer.setBackground(new Color(33, 33, 33));
 
-        // 1. Layer Nền: Video của đối phương tràn viền
+        // 1. Layer Nền: Video của đối phương
         pnlTargetVideo = new VideoPanel();
 
-        // 2. Layer Góc: Video của mình (Camera local)
+        // 2. Layer Góc: Video của mình
         lblMyVideo = new JLabel();
         lblMyVideo.setOpaque(true);
         lblMyVideo.setBackground(Color.BLACK);
-        lblMyVideo.setBorder(BorderFactory.createLineBorder(Color.GRAY, 2));
+        lblMyVideo.setBorder(BorderFactory.createLineBorder(new Color(100, 100, 100), 2));
         lblMyVideo.setVisible(false);
 
-        // 3. Layer Đáy: Tên, Trạng thái, và Các nút điều khiển
+        // 3. Layer Đáy: Tên, trạng thái và các nút (Nổi trên cùng)
         bottomCallPanel = new JPanel();
         bottomCallPanel.setLayout(new BoxLayout(bottomCallPanel, BoxLayout.Y_AXIS));
-        bottomCallPanel.setOpaque(false); // Trong suốt để thấy nền video
+        bottomCallPanel.setOpaque(false);
 
         lblCallName = new JLabel("Tên người gọi");
         lblCallName.setFont(new Font("SansSerif", Font.BOLD, 30));
@@ -232,7 +246,7 @@ public class MainClient extends JFrame {
 
         lblCallStatus = new JLabel("Đang gọi...");
         lblCallStatus.setFont(new Font("SansSerif", Font.PLAIN, 18));
-        lblCallStatus.setForeground(new Color(200, 200, 200));
+        lblCallStatus.setForeground(new Color(220, 220, 220));
         lblCallStatus.setAlignmentX(Component.CENTER_ALIGNMENT);
 
         JPanel callActionPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 30, 20));
@@ -263,31 +277,10 @@ public class MainClient extends JFrame {
         bottomCallPanel.add(Box.createVerticalStrut(20));
         bottomCallPanel.add(callActionPanel);
 
-        // Nạp các Layer vào đúng vị trí
+        // Đặt mức ưu tiên hiển thị (Z-Index)
         callContainer.add(pnlTargetVideo, JLayeredPane.DEFAULT_LAYER);
         callContainer.add(lblMyVideo, JLayeredPane.PALETTE_LAYER);
-        callContainer.add(bottomCallPanel, JLayeredPane.PALETTE_LAYER);
-
-        // Sự kiện tự động co giãn các thành phần khi cửa sổ thay đổi kích thước
-        callContainer.addComponentListener(new ComponentAdapter() {
-            @Override
-            public void componentResized(ComponentEvent e) {
-                int w = callContainer.getWidth();
-                int h = callContainer.getHeight();
-
-                // Video nền phủ kín toàn bộ
-                pnlTargetVideo.setBounds(0, 0, w, h);
-
-                // Video của mình nằm ở góc trên cùng bên phải
-                int myVidWidth = 160;
-                int myVidHeight = 120;
-                lblMyVideo.setBounds(w - myVidWidth - 20, 20, myVidWidth, myVidHeight);
-
-                // Panel điều khiển nằm ở đáy màn hình
-                int bottomHeight = 180;
-                bottomCallPanel.setBounds(0, h - bottomHeight, w, bottomHeight);
-            }
-        });
+        callContainer.add(bottomCallPanel, JLayeredPane.MODAL_LAYER);
 
         rightPanel.add(chatContainer, "CHAT");
         rightPanel.add(callContainer, "CALL");
@@ -359,7 +352,7 @@ public class MainClient extends JFrame {
     }
 
     private void sendToServer(String msg) {
-        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("172.26.60.7"), 8080)); } catch (Exception e) {}
+        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("localhost"), 8080)); } catch (Exception e) {}
     }
 
     private void sendP2P(Friend f, byte[] data) {
@@ -396,7 +389,7 @@ public class MainClient extends JFrame {
                         SwingUtilities.invokeLater(() -> {
                             try {
                                 BufferedImage img = ImageIO.read(new ByteArrayInputStream(imgBytes));
-                                pnlTargetVideo.setFrame(img); // Hiển thị hình ảnh đối phương đè lên Avatar nền
+                                pnlTargetVideo.setFrame(img);
                             } catch (Exception e) {}
                         });
                     }
@@ -587,10 +580,14 @@ public class MainClient extends JFrame {
         currentCallUser = currentTargetUser; sendP2P(f, new byte[]{4});
 
         pnlTargetVideo.setAvatarText(f.name.substring(0, 1).toUpperCase());
-        pnlTargetVideo.setFrame(null); // Reset màn hình đen có avatar
+        pnlTargetVideo.setFrame(null);
 
         lblCallName.setText(f.name); lblCallStatus.setText("Đang đổ chuông...");
-        btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true); cardLayout.show(rightPanel, "CALL");
+        btnAcceptCall.setVisible(false); btnDeclineCall.setVisible(false); btnEndCall.setVisible(true);
+        btnToggleVideo.setVisible(false);
+
+        cardLayout.show(rightPanel, "CALL");
+        rightPanel.revalidate(); rightPanel.repaint();
     }
 
     private void handleIncomingCall(String callerUsername) {
@@ -601,7 +598,13 @@ public class MainClient extends JFrame {
         pnlTargetVideo.setFrame(null);
 
         lblCallName.setText(f.name); lblCallStatus.setText("Cuộc gọi đến...");
-        btnAcceptCall.setVisible(true); btnDeclineCall.setVisible(true); btnEndCall.setVisible(false); cardLayout.show(rightPanel, "CALL");
+        btnAcceptCall.setVisible(true); btnDeclineCall.setVisible(true); btnEndCall.setVisible(false);
+        btnToggleVideo.setVisible(false);
+
+        Toolkit.getDefaultToolkit().beep(); // Phát âm báo cuộc gọi
+
+        cardLayout.show(rightPanel, "CALL");
+        rightPanel.revalidate(); rightPanel.repaint();
     }
 
     private void acceptCall() {
@@ -621,7 +624,7 @@ public class MainClient extends JFrame {
         stopAudioStreams();
         stopVideo();
         btnToggleVideo.setVisible(false);
-        pnlTargetVideo.setFrame(null); // Tắt hình đối phương
+        pnlTargetVideo.setFrame(null);
         cardLayout.show(rightPanel, "CHAT");
     }
 
@@ -775,7 +778,7 @@ public class MainClient extends JFrame {
     private void logout() {
         isRunning = false; closeCallUI(); isRecording = false;
         if(timer != null) timer.stop(); if(udpSocket != null) udpSocket.close(); if(recordMic != null) recordMic.close(); if(speaker != null) speaker.close();
-        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("172.26.60.7"), 8080)); } catch(Exception e) {}
+        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("localhost"), 8080)); } catch(Exception e) {}
         new LoginClient().setVisible(true); this.dispose();
     }
 
@@ -814,13 +817,11 @@ public class MainClient extends JFrame {
                 while (isVideoOn && currentCallUser != null && webcam.isOpen()) {
                     BufferedImage image = webcam.getImage();
                     if (image != null) {
-                        // 1. Cập nhật Cam của mình lên khung nhỏ ở góc phải
                         SwingUtilities.invokeLater(() -> {
                             Image scaled = image.getScaledInstance(160, 120, Image.SCALE_SMOOTH);
                             lblMyVideo.setIcon(new ImageIcon(scaled));
                         });
 
-                        // 2. Gửi cho đối phương
                         ByteArrayOutputStream baos = new ByteArrayOutputStream();
                         ImageIO.write(image, "jpg", baos);
                         byte[] imgBytes = baos.toByteArray();
@@ -832,7 +833,7 @@ public class MainClient extends JFrame {
                             udpSocket.send(new DatagramPacket(packetData, packetData.length, addr, targetPort));
                         }
                     }
-                    Thread.sleep(60); // Duy trì FPS ổn định
+                    Thread.sleep(60);
                 }
             } catch (Exception e) {}
         }).start();
@@ -857,7 +858,7 @@ public class MainClient extends JFrame {
 
         public VideoPanel() {
             setOpaque(true);
-            setBackground(new Color(20, 20, 20)); // Nền đen khi chưa bật video
+            setBackground(new Color(20, 20, 20));
         }
 
         public void setFrame(BufferedImage img) {
@@ -874,16 +875,14 @@ public class MainClient extends JFrame {
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             if (frame != null) {
-                // Nếu đối phương bật Cam, vẽ hình video tràn viền
                 g.drawImage(frame, 0, 0, getWidth(), getHeight(), null);
             } else {
-                // Nếu chưa bật Cam, vẽ hình tròn Avatar ở chính giữa
                 Graphics2D g2 = (Graphics2D) g;
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                 g2.setColor(new Color(0, 104, 255));
                 int size = 180;
                 int x = (getWidth() - size) / 2;
-                int y = (getHeight() - size) / 2 - 40; // Đẩy lên một chút cho cân đối
+                int y = (getHeight() - size) / 2 - 40;
                 g2.fillOval(x, y, size, size);
 
                 g2.setColor(Color.WHITE);
