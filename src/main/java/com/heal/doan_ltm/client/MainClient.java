@@ -6,6 +6,8 @@ import com.heal.doan_ltm.models.Friend;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
@@ -42,7 +44,6 @@ public class MainClient extends JFrame {
     private JPanel rightPanel, chatContainer;
     private JLayeredPane callContainer;
 
-    // UI CHO GIAO DIỆN CALL MỚI (STYLE ZALO)
     private VideoPanel pnlTargetVideo;
     private JLabel lblMyVideo;
     private JLabel lblCallName, lblCallStatus;
@@ -58,6 +59,10 @@ public class MainClient extends JFrame {
     private ByteArrayOutputStream currentRecordStream;
     private Timer timer;
     private Map<String, Friend> friends = new HashMap<>();
+
+    // BỘ NHỚ ĐỆM LƯU AVATAR CỦA BẠN BÈ ĐỂ KHÔNG PHẢI RENDER LẠI NHIỀU LẦN
+    private Map<String, BufferedImage> avatarCache = new HashMap<>();
+
     private String lastDataSync = "";
 
     private Webcam webcam;
@@ -67,7 +72,14 @@ public class MainClient extends JFrame {
     private Map<Long, byte[]> incomingData = new HashMap<>();
     private Map<Long, Integer> incomingDataReceived = new HashMap<>();
 
+    private MulticastSocket mcSocket;
+    private InetAddress mcGroup;
+    private boolean isMulticastMode = false;
+    private FlatButton btnMulticast;
+
     public MainClient(String user, String fullname, String avatar) {
+        System.setProperty("java.net.preferIPv4Stack", "true");
+
         this.currentUser = user; this.currentFullname = fullname.isEmpty() ? user : fullname; this.currentAvatarBase64 = avatar;
         setTitle("Z-Voice P2P - " + this.currentFullname);
         setSize(1100, 700); setDefaultCloseOperation(EXIT_ON_CLOSE); setLocationRelativeTo(null); setLayout(new BorderLayout());
@@ -114,8 +126,17 @@ public class MainClient extends JFrame {
         btnShowRequests.setHorizontalAlignment(SwingConstants.LEFT);
         btnShowRequests.addActionListener(e -> showRequestDialog());
 
+        btnMulticast = new FlatButton("    🌐 Phòng Chat LAN (Multicast)", new Color(230, 245, 235), new Color(46, 204, 113), 0);
+        btnMulticast.setPreferredSize(new Dimension(340, 45));
+        btnMulticast.setHorizontalAlignment(SwingConstants.LEFT);
+        btnMulticast.addActionListener(e -> activateMulticastMode());
+
+        JPanel pnlActions = new JPanel(new GridLayout(2, 1));
+        pnlActions.add(btnShowRequests);
+        pnlActions.add(btnMulticast);
+
         pnlTopMid.add(pnlSearch, BorderLayout.NORTH);
-        pnlTopMid.add(btnShowRequests, BorderLayout.SOUTH);
+        pnlTopMid.add(pnlActions, BorderLayout.SOUTH);
         midPanel.add(pnlTopMid, BorderLayout.NORTH);
 
         pnlFriendList = new JPanel(); pnlFriendList.setLayout(new BoxLayout(pnlFriendList, BoxLayout.Y_AXIS)); pnlFriendList.setBackground(Color.WHITE);
@@ -201,9 +222,6 @@ public class MainClient extends JFrame {
 
         chatContainer.add(headerPanel, BorderLayout.NORTH); chatContainer.add(chatScroll, BorderLayout.CENTER); chatContainer.add(chatBottomPanel, BorderLayout.SOUTH);
 
-        // ==========================================
-        // THIẾT KẾ KHỐI CALL THEO STYLE ZALO (LAYERED)
-        // ==========================================
         callContainer = new JLayeredPane() {
             @Override
             public void doLayout() {
@@ -211,30 +229,22 @@ public class MainClient extends JFrame {
                 int w = getWidth();
                 int h = getHeight();
 
-                // Ép kích thước Video nền phủ kín toàn bộ
                 if (pnlTargetVideo != null) pnlTargetVideo.setBounds(0, 0, w, h);
-
-                // Ép kích thước Video của mình nằm góc phải
                 if (lblMyVideo != null) lblMyVideo.setBounds(w - 180, 20, 160, 120);
-
-                // Ép kích thước Panel điều khiển ở đáy màn hình
                 if (bottomCallPanel != null) bottomCallPanel.setBounds(0, h - 200, w, 200);
             }
         };
         callContainer.setOpaque(true);
         callContainer.setBackground(new Color(33, 33, 33));
 
-        // 1. Layer Nền: Video của đối phương
         pnlTargetVideo = new VideoPanel();
 
-        // 2. Layer Góc: Video của mình
         lblMyVideo = new JLabel();
         lblMyVideo.setOpaque(true);
         lblMyVideo.setBackground(Color.BLACK);
         lblMyVideo.setBorder(BorderFactory.createLineBorder(new Color(100, 100, 100), 2));
         lblMyVideo.setVisible(false);
 
-        // 3. Layer Đáy: Tên, trạng thái và các nút (Nổi trên cùng)
         bottomCallPanel = new JPanel();
         bottomCallPanel.setLayout(new BoxLayout(bottomCallPanel, BoxLayout.Y_AXIS));
         bottomCallPanel.setOpaque(false);
@@ -277,7 +287,6 @@ public class MainClient extends JFrame {
         bottomCallPanel.add(Box.createVerticalStrut(20));
         bottomCallPanel.add(callActionPanel);
 
-        // Đặt mức ưu tiên hiển thị (Z-Index)
         callContainer.add(pnlTargetVideo, JLayeredPane.DEFAULT_LAYER);
         callContainer.add(lblMyVideo, JLayeredPane.PALETTE_LAYER);
         callContainer.add(bottomCallPanel, JLayeredPane.MODAL_LAYER);
@@ -295,6 +304,7 @@ public class MainClient extends JFrame {
         btnImg.addActionListener(e -> sendFileOrImage(8));
         btnFile.addActionListener(e -> sendFileOrImage(9));
         btnRecord.addActionListener(e -> toggleRecord());
+
         btnSend.addActionListener(e -> sendText());
         txtChat.addActionListener(e -> sendText());
 
@@ -346,13 +356,15 @@ public class MainClient extends JFrame {
             speaker.open(format); speaker.start();
 
             new Thread(this::listenData).start();
+            new Thread(this::listenForBroadcast).start();
+
             timer = new Timer(3000, e -> { sendToServer("ONLINE;;;" + currentUser); sendToServer("GETDATA;;;" + currentUser); });
             timer.start();
         } catch (Exception e) {}
     }
 
     private void sendToServer(String msg) {
-        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("172.26.60.7"), 8080)); } catch (Exception e) {}
+        try { byte[] data = msg.getBytes("UTF-8"); udpSocket.send(new DatagramPacket(data, data.length, InetAddress.getByName("localhost"), 8080)); } catch (Exception e) {}
     }
 
     private void sendP2P(Friend f, byte[] data) {
@@ -396,8 +408,8 @@ public class MainClient extends JFrame {
                     else if (type == 1 && senderF != null) {
                         String text = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
                         SwingUtilities.invokeLater(() -> {
-                            if (currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
-                                appendMsg(senderF.name, text, false);
+                            if (!isMulticastMode && currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
+                                appendMsg(senderF.username, senderF.name, text, false);
                             }
                         });
                     }
@@ -411,10 +423,10 @@ public class MainClient extends JFrame {
                         if (received >= total) {
                             byte[] finalData = fullData.clone();
                             SwingUtilities.invokeLater(() -> {
-                                if (currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
-                                    if(type == 3) appendAudioMsg(senderF.name, finalData, false);
-                                    else if(type == 8) appendImageMsg(senderF.name, finalData, false);
-                                    else if(type == 9) appendFileMsg(senderF.name, finalData, false);
+                                if (!isMulticastMode && currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
+                                    if(type == 3) appendAudioMsg(senderF.username, senderF.name, finalData, false);
+                                    else if(type == 8) appendImageMsg(senderF.username, senderF.name, finalData, false);
+                                    else if(type == 9) appendFileMsg(senderF.username, senderF.name, finalData, false);
                                 }
                             });
                             incomingData.remove(id); incomingDataReceived.remove(id);
@@ -431,6 +443,8 @@ public class MainClient extends JFrame {
 
     private void processServerMsg(String s) {
         if (s.startsWith("MSGDATA;;;")) {
+            if(isMulticastMode) return;
+
             String data = s.substring(10);
             chatPanel.removeAll();
             if (!data.isEmpty()) {
@@ -448,7 +462,7 @@ public class MainClient extends JFrame {
                             Friend fr = friends.get(senderUsername);
                             if(fr != null) senderName = fr.name;
                         }
-                        appendMsg(senderName, content, isMe);
+                        appendMsg(senderUsername, senderName, content, isMe);
                     }
                 }
             }
@@ -471,6 +485,18 @@ public class MainClient extends JFrame {
                     Friend friendObj = new Friend(d[0], d[1], d[2], Integer.parseInt(d[3]));
                     friends.put(d[0], friendObj);
 
+                    // XỬ LÝ AVATAR TỪ SERVER TRẢ VỀ (CỘT SỐ 5)
+                    BufferedImage frImg = null;
+                    if (d.length > 4 && !d[4].equals("null") && !d[4].isEmpty()) {
+                        try {
+                            byte[] imgBytes = Base64.getDecoder().decode(d[4]);
+                            frImg = ImageIO.read(new ByteArrayInputStream(imgBytes));
+                            avatarCache.put(d[0], frImg);
+                        } catch (Exception ex) {}
+                    } else {
+                        avatarCache.remove(d[0]);
+                    }
+
                     JPanel item = new JPanel(new BorderLayout(10, 0));
                     item.setBackground(Color.WHITE); item.setBorder(new EmptyBorder(10, 20, 10, 10));
                     item.setMaximumSize(new Dimension(Integer.MAX_VALUE, 65));
@@ -478,6 +504,12 @@ public class MainClient extends JFrame {
                     RoundAvatar av = new RoundAvatar(friendObj.name.substring(0, 1).toUpperCase());
                     av.setPreferredSize(new Dimension(45, 45)); av.setMinimumSize(new Dimension(45, 45)); av.setMaximumSize(new Dimension(45, 45));
                     av.setBackground(new Color(0, 104, 255)); av.setForeground(Color.WHITE); av.setFont(new Font("SansSerif", Font.BOLD, 18));
+
+                    // Gắn ảnh thật nếu có
+                    if (frImg != null) {
+                        av.setImage(frImg);
+                        av.setAvatarText("");
+                    }
 
                     JPanel info = new JPanel(new GridLayout(2, 1, 0, 3)); info.setOpaque(false);
                     JLabel nameLbl = new JLabel(friendObj.name); nameLbl.setFont(new Font("SansSerif", Font.BOLD, 15));
@@ -496,7 +528,7 @@ public class MainClient extends JFrame {
                         int ans = JOptionPane.showConfirmDialog(this, "Bạn có chắc muốn xóa kết bạn với " + friendObj.name + "?", "Xóa kết bạn", JOptionPane.YES_NO_OPTION);
                         if (ans == JOptionPane.YES_OPTION) {
                             sendToServer("UNFRIEND;;;" + currentUser + ";;;" + friendObj.username);
-                            if(currentTargetUser != null && currentTargetUser.equals(friendObj.username)) {
+                            if(!isMulticastMode && currentTargetUser != null && currentTargetUser.equals(friendObj.username)) {
                                 currentTargetUser = null; lblTarget.setText("Chọn bạn bè để trò chuyện"); lblTargetStatus.setText("");
                                 txtChat.setEnabled(false); btnSend.setEnabled(false); btnCall.setEnabled(false);
                                 btnRecord.setEnabled(false); btnImg.setEnabled(false); btnFile.setEnabled(false); btnIcon.setEnabled(false);
@@ -516,6 +548,8 @@ public class MainClient extends JFrame {
                     item.setCursor(new Cursor(Cursor.HAND_CURSOR));
                     item.addMouseListener(new MouseAdapter() {
                         public void mouseClicked(MouseEvent e) {
+                            deactivateMulticastMode();
+
                             currentTargetUser = friendObj.username; lblTarget.setText(friendObj.name);
                             lblTargetStatus.setText(friendObj.isOnline() ? "Đang hoạt động" : "Ngoại tuyến");
                             lblTargetStatus.setForeground(friendObj.isOnline() ? new Color(46, 204, 113) : new Color(170, 170, 170));
@@ -531,7 +565,7 @@ public class MainClient extends JFrame {
                         public void mouseEntered(MouseEvent e) { if (!item.getBackground().equals(new Color(240, 245, 255))) item.setBackground(new Color(245, 245, 245)); }
                         public void mouseExited(MouseEvent e) { if (!item.getBackground().equals(new Color(240, 245, 255))) item.setBackground(Color.WHITE); }
                     });
-                    if (currentTargetUser != null && currentTargetUser.equals(friendObj.username)) {
+                    if (!isMulticastMode && currentTargetUser != null && currentTargetUser.equals(friendObj.username)) {
                         item.setBackground(new Color(240, 245, 255));
                         lblTargetStatus.setText(friendObj.isOnline() ? "Đang hoạt động" : "Ngoại tuyến");
                         lblTargetStatus.setForeground(friendObj.isOnline() ? new Color(46, 204, 113) : new Color(170, 170, 170));
@@ -575,6 +609,7 @@ public class MainClient extends JFrame {
     }
 
     private void initiateCall() {
+        if (isMulticastMode) { JOptionPane.showMessageDialog(this, "Không hỗ trợ gọi thoại trong phòng chat chung!"); return;}
         if (currentTargetUser == null) return; Friend f = friends.get(currentTargetUser);
         if (f == null || !f.isOnline()) { JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!"); return; }
         currentCallUser = currentTargetUser; sendP2P(f, new byte[]{4});
@@ -601,7 +636,7 @@ public class MainClient extends JFrame {
         btnAcceptCall.setVisible(true); btnDeclineCall.setVisible(true); btnEndCall.setVisible(false);
         btnToggleVideo.setVisible(false);
 
-        Toolkit.getDefaultToolkit().beep(); // Phát âm báo cuộc gọi
+        Toolkit.getDefaultToolkit().beep();
 
         cardLayout.show(rightPanel, "CALL");
         rightPanel.revalidate(); rightPanel.repaint();
@@ -663,6 +698,7 @@ public class MainClient extends JFrame {
     }
 
     private void sendFileOrImage(int type) {
+        if (isMulticastMode) { JOptionPane.showMessageDialog(this, "Không hỗ trợ gửi File/Ảnh trong phòng chat chung!"); return;}
         if (currentTargetUser == null) return; Friend f = friends.get(currentTargetUser);
         if (f == null || !f.isOnline()) { JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!"); return; }
 
@@ -671,17 +707,18 @@ public class MainClient extends JFrame {
             File file = fc.getSelectedFile();
             try {
                 byte[] fileBytes = Files.readAllBytes(file.toPath());
-                if(type == 8) { sendFragmentedData(f, (byte)8, fileBytes); appendImageMsg("", fileBytes, true); }
+                if(type == 8) { sendFragmentedData(f, (byte)8, fileBytes); appendImageMsg(currentUser, currentFullname, fileBytes, true); }
                 else {
                     byte[] nameBytes = file.getName().getBytes("UTF-8"); ByteBuffer bb = ByteBuffer.allocate(4 + nameBytes.length + fileBytes.length);
                     bb.putInt(nameBytes.length); bb.put(nameBytes); bb.put(fileBytes);
-                    sendFragmentedData(f, (byte)9, bb.array()); appendFileMsg("", bb.array(), true);
+                    sendFragmentedData(f, (byte)9, bb.array()); appendFileMsg(currentUser, currentFullname, bb.array(), true);
                 }
             } catch(Exception ex) { JOptionPane.showMessageDialog(this, "Lỗi đọc file"); }
         }
     }
 
     private void toggleRecord() {
+        if (isMulticastMode) { JOptionPane.showMessageDialog(this, "Không hỗ trợ gửi Ghi âm trong phòng chat chung!"); return;}
         if (currentTargetUser == null) return; Friend f = friends.get(currentTargetUser);
         if (f == null || !f.isOnline()) { JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!"); return; }
 
@@ -698,55 +735,104 @@ public class MainClient extends JFrame {
             } catch (Exception e) {}
         } else {
             isRecording = false; btnRecord.setForeground(new Color(120, 120, 120)); byte[] audioData = currentRecordStream.toByteArray();
-            appendAudioMsg("", audioData, true); sendFragmentedData(f, (byte)3, audioData);
+            appendAudioMsg(currentUser, currentFullname, audioData, true); sendFragmentedData(f, (byte)3, audioData);
         }
     }
 
     private void sendText() {
-        if(currentTargetUser == null || txtChat.getText().trim().isEmpty()) return; Friend f = friends.get(currentTargetUser);
-        if(f != null && f.isOnline()) {
+        if(txtChat.getText().trim().isEmpty()) return;
+        String messageContent = txtChat.getText().trim();
+
+        if (isMulticastMode) {
             try {
-                String messageContent = txtChat.getText().trim();
-                byte[] textBytes = messageContent.getBytes("UTF-8"); byte[] packetData = new byte[textBytes.length + 1]; packetData[0] = 1;
-                System.arraycopy(textBytes, 0, packetData, 1, textBytes.length);
-                udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port));
-
-                sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;" + messageContent);
-
-                appendMsg("", messageContent, true); txtChat.setText("");
+                // Multicast gửi luôn cả username và fullname để nhận diện Avatar
+                String fullMsg = currentUser + ":::" + currentFullname + ":::" + messageContent;
+                byte[] data = fullMsg.getBytes("UTF-8");
+                DatagramPacket p = new DatagramPacket(data, data.length, mcGroup, 9999);
+                if(mcSocket != null) mcSocket.send(p);
+                txtChat.setText("");
             } catch (Exception e) {}
-        } else JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
+        } else {
+            if(currentTargetUser == null) return;
+            Friend f = friends.get(currentTargetUser);
+            if(f != null && f.isOnline()) {
+                try {
+                    byte[] textBytes = messageContent.getBytes("UTF-8"); byte[] packetData = new byte[textBytes.length + 1]; packetData[0] = 1;
+                    System.arraycopy(textBytes, 0, packetData, 1, textBytes.length);
+                    udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port));
+
+                    sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;" + messageContent);
+
+                    appendMsg(currentUser, currentFullname, messageContent, true); txtChat.setText("");
+                } catch (Exception e) {}
+            } else JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
+        }
     }
 
-    private void addChatBubble(JComponent comp, boolean isMe, String sender) {
+    // THÊM SENDER USERNAME VÀO HÀM ĐỂ TÌM AVATAR TRONG CACHE
+    private void addChatBubble(JComponent comp, boolean isMe, String senderUsername, String senderName) {
         JPanel w = new JPanel(new FlowLayout(isMe ? FlowLayout.RIGHT : FlowLayout.LEFT)); w.setOpaque(false); w.setBorder(new EmptyBorder(5, 5, 5, 5));
-        if (!isMe && !sender.isEmpty()) {
-            RoundAvatar av = new RoundAvatar(sender.substring(0, 1).toUpperCase()); av.setPreferredSize(new Dimension(35, 35));
-            av.setBackground(new Color(0, 104, 255)); av.setForeground(Color.WHITE); av.setFont(new Font("SansSerif", Font.BOLD, 14)); w.add(av);
+
+        if (!isMe) {
+            String initial = (senderName != null && !senderName.isEmpty()) ? senderName.substring(0, 1).toUpperCase() : "?";
+            RoundAvatar av = new RoundAvatar(initial);
+            av.setPreferredSize(new Dimension(35, 35));
+            av.setBackground(new Color(0, 104, 255)); av.setForeground(Color.WHITE); av.setFont(new Font("SansSerif", Font.BOLD, 14));
+
+            // Xử lý lấy ảnh thật từ Cache
+            if (senderUsername != null && avatarCache.containsKey(senderUsername)) {
+                av.setImage(avatarCache.get(senderUsername));
+                av.setAvatarText("");
+            }
+            w.add(av);
         }
+
         w.add(comp); chatPanel.add(w); chatPanel.revalidate(); chatPanel.repaint();
         JScrollBar vertical = ((JScrollPane) chatPanel.getParent().getParent()).getVerticalScrollBar();
         SwingUtilities.invokeLater(() -> vertical.setValue(vertical.getMaximum()));
     }
 
-    private void appendMsg(String sender, String msg, boolean isMe) {
-        boolean isEmoji = msg.length() <= 8 && !msg.matches(".*[a-zA-Z0-9].*"); JLabel l = new JLabel(msg);
+    private void appendMsg(String senderUsername, String senderName, String msg, boolean isMe) {
+        boolean isEmoji = msg.length() <= 8 && !msg.matches(".*[a-zA-Z0-9].*");
+
+        JPanel pnlContent = new JPanel();
+        pnlContent.setLayout(new BoxLayout(pnlContent, BoxLayout.Y_AXIS));
+        pnlContent.setOpaque(false);
+
+        if (isMulticastMode && !isMe && senderName != null && !senderName.isEmpty()) {
+            JLabel lblName = new JLabel(senderName);
+            lblName.setFont(new Font("SansSerif", Font.BOLD, 12));
+            lblName.setForeground(Color.GRAY);
+            pnlContent.add(lblName);
+        }
+
+        JLabel l = new JLabel(msg);
         if(!isEmoji) {
-            l.setFont(new Font("SansSerif", Font.PLAIN, 15)); BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE);
-            l.setForeground(isMe ? Color.WHITE : new Color(30, 30, 30)); bubble.add(l, BorderLayout.CENTER); addChatBubble(bubble, isMe, sender);
-        } else { l.setFont(new Font("SansSerif", Font.PLAIN, 45)); addChatBubble(l, isMe, sender); }
+            l.setFont(new Font("SansSerif", Font.PLAIN, 15));
+            BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE);
+            l.setForeground(isMe ? Color.WHITE : new Color(30, 30, 30));
+
+            pnlContent.add(l);
+            bubble.add(pnlContent, BorderLayout.CENTER);
+            addChatBubble(bubble, isMe, senderUsername, senderName);
+        } else {
+            l.setFont(new Font("SansSerif", Font.PLAIN, 45));
+            pnlContent.add(l);
+            addChatBubble(pnlContent, isMe, senderUsername, senderName);
+        }
     }
 
-    private void appendImageMsg(String sender, byte[] imgData, boolean isMe) {
+    private void appendImageMsg(String senderUsername, String senderName, byte[] imgData, boolean isMe) {
         try {
             BufferedImage img = ImageIO.read(new ByteArrayInputStream(imgData)); int w = img.getWidth(), h = img.getHeight(), max = 220;
             if(w > max || h > max) { float ratio = Math.min((float)max/w, (float)max/h); w = Math.round(w*ratio); h = Math.round(h*ratio); }
             Image scaled = img.getScaledInstance(w, h, Image.SCALE_SMOOTH); JLabel l = new JLabel(new ImageIcon(scaled));
-            BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE); bubble.add(l, BorderLayout.CENTER); addChatBubble(bubble, isMe, sender);
+            BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE); bubble.add(l, BorderLayout.CENTER);
+            addChatBubble(bubble, isMe, senderUsername, senderName);
         } catch(Exception e) {}
     }
 
-    private void appendFileMsg(String sender, byte[] payload, boolean isMe) {
+    private void appendFileMsg(String senderUsername, String senderName, byte[] payload, boolean isMe) {
         try {
             ByteBuffer bb = ByteBuffer.wrap(payload); int nameLen = bb.getInt(); byte[] nameBytes = new byte[nameLen]; bb.get(nameBytes);
             String fileName = new String(nameBytes, "UTF-8"); byte[] fileData = new byte[payload.length - 4 - nameLen]; bb.get(fileData);
@@ -757,11 +843,12 @@ public class MainClient extends JFrame {
                 JFileChooser fc = new JFileChooser(); fc.setSelectedFile(new File(fileName));
                 if(fc.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) { try { Files.write(fc.getSelectedFile().toPath(), fileData); JOptionPane.showMessageDialog(this, "Đã lưu!"); } catch(Exception ex) {} }
             });
-            BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE); bubble.add(btn, BorderLayout.CENTER); addChatBubble(bubble, isMe, sender);
+            BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE); bubble.add(btn, BorderLayout.CENTER);
+            addChatBubble(bubble, isMe, senderUsername, senderName);
         } catch(Exception e) {}
     }
 
-    private void appendAudioMsg(String sender, byte[] audioData, boolean isMe) {
+    private void appendAudioMsg(String senderUsername, String senderName, byte[] audioData, boolean isMe) {
         FlatButton btnPlay = new FlatButton("► Tin nhắn thoại", isMe ? new Color(0, 104, 255) : Color.WHITE, isMe ? Color.WHITE : new Color(30, 30, 30), 10);
         btnPlay.setFont(new Font("SansSerif", Font.PLAIN, 14));
         btnPlay.addActionListener(e -> {
@@ -772,13 +859,14 @@ public class MainClient extends JFrame {
                 } catch(Exception ex) {}
             }).start();
         });
-        BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE); bubble.add(btnPlay, BorderLayout.CENTER); addChatBubble(bubble, isMe, sender);
+        BubblePanel bubble = new BubblePanel(isMe ? new Color(0, 104, 255) : Color.WHITE); bubble.add(btnPlay, BorderLayout.CENTER);
+        addChatBubble(bubble, isMe, senderUsername, senderName);
     }
 
     private void logout() {
-        isRunning = false; closeCallUI(); isRecording = false;
+        isRunning = false; closeCallUI(); isRecording = false; deactivateMulticastMode();
         if(timer != null) timer.stop(); if(udpSocket != null) udpSocket.close(); if(recordMic != null) recordMic.close(); if(speaker != null) speaker.close();
-        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("172.26.60.7"), 8080)); } catch(Exception e) {}
+        try (DatagramSocket tmp = new DatagramSocket()) { byte[] dt = ("ONLINE;;;" + currentUser).getBytes("UTF-8"); tmp.send(new DatagramPacket(dt, dt.length, InetAddress.getByName("localhost"), 8080)); } catch(Exception e) {}
         new LoginClient().setVisible(true); this.dispose();
     }
 
@@ -849,9 +937,93 @@ public class MainClient extends JFrame {
         }
     }
 
-    // ==========================================
-    // CLASS BỔ TRỢ: KHUNG VẼ VIDEO TRÀN VIỀN
-    // ==========================================
+    private void listenForBroadcast() {
+        try {
+            DatagramSocket broadcastSocket = new DatagramSocket(null);
+            broadcastSocket.setReuseAddress(true);
+            broadcastSocket.bind(new InetSocketAddress(8888));
+            byte[] buffer = new byte[2048];
+            while (isRunning) {
+                DatagramPacket p = new DatagramPacket(buffer, buffer.length);
+                broadcastSocket.receive(p);
+                String msg = new String(p.getData(), 0, p.getLength(), "UTF-8");
+                if (msg.startsWith("SERVER_MSG:::")) {
+                    String text = msg.substring(13);
+                    SwingUtilities.invokeLater(() -> {
+                        Toolkit.getDefaultToolkit().beep();
+                        JOptionPane.showMessageDialog(this, "📢 THÔNG BÁO KHẨN TỪ SERVER:\n\n" + text, "Broadcast Message", JOptionPane.WARNING_MESSAGE);
+                    });
+                }
+            }
+        } catch (Exception e) {}
+    }
+
+    private void activateMulticastMode() {
+        if (isMulticastMode) return;
+
+        isMulticastMode = true;
+        currentTargetUser = null;
+
+        for (Component comp : pnlFriendList.getComponents()) comp.setBackground(Color.WHITE);
+        btnMulticast.setBackground(new Color(200, 230, 210));
+
+        lblTarget.setText("Phòng Chat LAN Chung (Multicast)");
+        lblTargetStatus.setText("Tất cả thành viên trong mạng LAN đều có mặt");
+        lblTargetStatus.setForeground(new Color(46, 204, 113));
+
+        txtChat.setEnabled(true); btnSend.setEnabled(true); btnIcon.setEnabled(true);
+        btnCall.setEnabled(false); btnRecord.setEnabled(false); btnImg.setEnabled(false); btnFile.setEnabled(false);
+
+        chatPanel.removeAll();
+        chatPanel.revalidate(); chatPanel.repaint();
+        appendMsg(null, "", "Chào mừng bạn đến với phòng chat chung! Tin nhắn gửi ở đây sẽ tới mọi máy trong mạng.", false);
+
+        try {
+            mcSocket = new MulticastSocket(9999);
+            mcGroup = InetAddress.getByName("224.0.0.1");
+            mcSocket.joinGroup(mcGroup);
+
+            new Thread(() -> {
+                try {
+                    byte[] buf = new byte[2048];
+                    while (isMulticastMode && isRunning) {
+                        DatagramPacket p = new DatagramPacket(buf, buf.length);
+                        mcSocket.receive(p);
+                        String rcv = new String(p.getData(), 0, p.getLength(), "UTF-8");
+
+                        String[] parts = rcv.split(":::");
+                        if(parts.length == 3) {
+                            String senderUser = parts[0];
+                            String senderName = parts[1];
+                            String content = parts[2];
+                            boolean isMe = senderUser.equals(currentUser);
+
+                            SwingUtilities.invokeLater(() -> appendMsg(senderUser, senderName, content, isMe));
+                        }
+                    }
+                } catch (Exception e) {}
+            }).start();
+
+        } catch (Exception e) {
+            JOptionPane.showMessageDialog(this, "Lỗi kết nối mạng Multicast!");
+        }
+    }
+
+    private void deactivateMulticastMode() {
+        if (!isMulticastMode) return;
+        isMulticastMode = false;
+        btnMulticast.setBackground(new Color(230, 245, 235));
+
+        try {
+            if (mcSocket != null && mcGroup != null) {
+                mcSocket.leaveGroup(mcGroup);
+                mcSocket.close();
+                mcSocket = null;
+            }
+        } catch (Exception e) {}
+    }
+
+
     class VideoPanel extends JPanel {
         private BufferedImage frame;
         private String avatarText = "?";

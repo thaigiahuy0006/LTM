@@ -37,6 +37,32 @@ public class UDPServer extends JFrame {
 
         Timer timer = new Timer(3000, e -> refreshOnlineUsers());
         timer.start();
+        JPanel pnlBroadcast = new JPanel(new BorderLayout(10, 5));
+        pnlBroadcast.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JTextField txtBroadcast = new JTextField();
+        txtBroadcast.setFont(new Font("SansSerif", Font.PLAIN, 15));
+        JButton btnBroadcast = new JButton("Phát Thông Báo (Broadcast)");
+        btnBroadcast.setBackground(new Color(231, 76, 60));
+        btnBroadcast.setForeground(Color.WHITE);
+        btnBroadcast.setFont(new Font("SansSerif", Font.BOLD, 14));
+
+        pnlBroadcast.add(new JLabel("Thông báo từ Server:"), BorderLayout.WEST);
+        pnlBroadcast.add(txtBroadcast, BorderLayout.CENTER);
+        pnlBroadcast.add(btnBroadcast, BorderLayout.EAST);
+        add(pnlBroadcast, BorderLayout.SOUTH);
+
+        btnBroadcast.addActionListener(e -> {
+            String msg = "SERVER_MSG:::" + txtBroadcast.getText();
+            try (DatagramSocket socket = new DatagramSocket()) {
+                socket.setBroadcast(true); // Bật chế độ Broadcast
+                byte[] data = msg.getBytes("UTF-8");
+                // Gửi tới IP Broadcast mặc định 255.255.255.255 trên cổng 8888
+                DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), 8888);
+                socket.send(packet);
+                txtBroadcast.setText("");
+                JOptionPane.showMessageDialog(this, "Đã phát Broadcast tới tất cả Client trong mạng!");
+            } catch (Exception ex) { ex.printStackTrace(); }
+        });
 
         new Thread(this::startUDPServer).start();
     }
@@ -199,10 +225,21 @@ public class UDPServer extends JFrame {
     private static String getData(String u) {
         StringBuilder sb = new StringBuilder("DATA;;;");
         try (Connection c = getConn()) {
-            PreparedStatement s1 = c.prepareStatement("SELECT u.username, u.fullname, u.ip, u.port FROM users u JOIN friends f ON (f.user1=u.username OR f.user2=u.username) WHERE (f.user1=? OR f.user2=?) AND f.status=1 AND u.username!=?");
+            // ĐÃ THÊM u.avatar VÀO CÂU LUYỆN TRUY VẤN
+            PreparedStatement s1 = c.prepareStatement("SELECT u.username, u.fullname, u.ip, u.port, u.avatar FROM users u JOIN friends f ON (f.user1=u.username OR f.user2=u.username) WHERE (f.user1=? OR f.user2=?) AND f.status=1 AND u.username!=?");
             s1.setString(1, u); s1.setString(2, u); s1.setString(3, u);
             ResultSet r1 = s1.executeQuery();
-            while(r1.next()) sb.append(r1.getString(1)).append(":").append(r1.getString(2)).append(":").append(r1.getString(3)).append(":").append(r1.getInt(4)).append("|");
+            while(r1.next()) {
+                String avtStr = r1.getString("avatar");
+                if (avtStr == null || avtStr.isEmpty()) avtStr = "null";
+
+                // Nối thêm thông tin avatar vào sau port (cách nhau bởi dấu hai chấm)
+                sb.append(r1.getString(1)).append(":")
+                        .append(r1.getString(2)).append(":")
+                        .append(r1.getString(3)).append(":")
+                        .append(r1.getInt(4)).append(":")
+                        .append(avtStr).append("|");
+            }
             sb.append("###");
             PreparedStatement s2 = c.prepareStatement("SELECT u.username, u.fullname FROM users u JOIN friends f ON f.user1=u.username WHERE f.user2=? AND f.status=0");
             s2.setString(1, u);
