@@ -18,6 +18,7 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.geom.RoundRectangle2D;
@@ -29,6 +30,7 @@ import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.swing.Timer;
@@ -58,12 +60,63 @@ public class MainClient extends JFrame {
     private String currentTargetUser = null;
     private int currentGroupId = -1;
     private String currentCallUser = null;
+    private boolean isGroupConferenceCall = false;
 
     private RoundAvatar avatarLabel, targetAvatarHeader;
     private JLabel lblTarget, lblTargetStatus;
     private JTextField txtChat, txtSidebarSearch;
     private JPanel chatPanel;
     private FlatButton btnCall, btnVideoHeader, btnToggleInfo, btnGroupMembers, btnSend, btnRecord, btnImg, btnFile, btnIcon, btnShowRequests;
+
+    // Thanh tin nhắn đã ghim trên đầu khung chat
+    private JPanel pinnedBannerPanel;
+    private JLabel lblPinnedTitle, lblPinnedPreview;
+    private FlatButton btnPinnedList, btnUnpinBanner;
+    private List<PinnedMessageItem> currentPinnedMessages = new ArrayList<>();
+
+    // Quản lý từng bong bóng tin nhắn để Thu hồi / Ghim / Cuộn tới
+    private Map<String, ChatBubbleEntry> messageBubbles = new LinkedHashMap<>();
+    private final AtomicInteger msgSeq = new AtomicInteger(0);
+    private int legacyCounter = 0;
+
+    private static class PinnedMessageItem {
+        final String msgId;
+        final String senderName;
+        final String preview;
+        PinnedMessageItem(String msgId, String senderName, String preview) {
+            this.msgId = msgId;
+            this.senderName = senderName;
+            this.preview = preview;
+        }
+    }
+
+    private static class ChatBubbleEntry {
+        final String msgId;
+        final String senderUsername;
+        final String senderName;
+        final String previewText;
+        final String copyableText;
+        final boolean isMe;
+        boolean isRecalled;
+        final JPanel wrapperRow;
+        final JPanel bubbleHolder;
+        FlatButton btnMore;
+        SharedMediaItem linkedMedia;
+        SharedFileItem linkedFile;
+
+        ChatBubbleEntry(String msgId, String senderUsername, String senderName, String previewText,
+                        String copyableText, boolean isMe, boolean isRecalled, JPanel wrapperRow, JPanel bubbleHolder) {
+            this.msgId = msgId;
+            this.senderUsername = senderUsername;
+            this.senderName = senderName;
+            this.previewText = previewText;
+            this.copyableText = copyableText;
+            this.isMe = isMe;
+            this.isRecalled = isRecalled;
+            this.wrapperRow = wrapperRow;
+            this.bubbleHolder = bubbleHolder;
+        }
+    }
 
     private JPanel pnlReqList, pnlConversationList, pnlSearchActions;
     private FlatButton btnCloseSearch;
@@ -73,7 +126,7 @@ public class MainClient extends JFrame {
     private JDialog requestDialog;
     private JPanel pnlAddFriendResult;
 
-    // Khung "Thông tin hội thoại" & "Kho lưu trữ" bên phải giống Zalo PC
+    // Khung "Thông tin hội thoại", "Kho lưu trữ" & "Thành viên" bên phải giống Zalo PC
     private JPanel infoDrawerPanel;
     private CardLayout infoDrawerCardLayout;
     private RoundAvatar infoAvatar;
@@ -85,6 +138,10 @@ public class MainClient extends JFrame {
     private JPanel pnlArchiveContent;
     private JLabel lblArchiveTabMedia, lblArchiveTabFiles, lblArchiveTabLinks;
     private String activeArchiveTab = "MEDIA";
+
+    // Thành phần bên trong thẻ "Thành viên" (giống hệt ảnh mẫu Zalo PC)
+    private JLabel lblMembersSectionTitle;
+    private JPanel pnlGroupMembersList;
 
     private List<SharedMediaItem> currentSharedImages = new ArrayList<>();
     private List<SharedFileItem> currentSharedFiles = new ArrayList<>();
@@ -441,9 +498,9 @@ public class MainClient extends JFrame {
         btnGroupMembers = new FlatButton(" Thành viên", ZALO_HOVER_ITEM, ZALO_TEXT_DARK, 8);
         btnGroupMembers.setIcon(new ZaloIcon(ZaloIcon.Type.USERS, 18, ZALO_ICON_GRAY));
         btnGroupMembers.setFont(new Font("SansSerif", Font.BOLD, 12));
-        btnGroupMembers.setPreferredSize(new Dimension(110, 36));
+        btnGroupMembers.setPreferredSize(new Dimension(112, 36));
         btnGroupMembers.setVisible(false);
-        btnGroupMembers.addActionListener(e -> showCurrentGroupMembers());
+        btnGroupMembers.addActionListener(e -> openGroupMembersDrawer());
 
         btnCall = new FlatButton("", new Color(0, 0, 0, 0), ZALO_ICON_GRAY, 8);
         btnCall.setIcon(new ZaloIcon(ZaloIcon.Type.PHONE, 20, ZALO_ICON_GRAY));
@@ -468,6 +525,14 @@ public class MainClient extends JFrame {
         callPanel.add(btnVideoHeader);
         callPanel.add(btnToggleInfo);
         headerPanel.add(callPanel, BorderLayout.EAST);
+
+        // Thanh Tin nhắn đã ghim (ẩn mặc định, hiện khi có tin nhắn ghim)
+        pinnedBannerPanel = createPinnedBannerPanel();
+
+        JPanel topChatStack = new JPanel();
+        topChatStack.setLayout(new BoxLayout(topChatStack, BoxLayout.Y_AXIS));
+        topChatStack.add(headerPanel);
+        topChatStack.add(pinnedBannerPanel);
 
         chatPanel = new JPanel();
         chatPanel.setLayout(new BoxLayout(chatPanel, BoxLayout.Y_AXIS));
@@ -535,12 +600,12 @@ public class MainClient extends JFrame {
         chatBottomPanel.add(toolbarRow, BorderLayout.NORTH);
         chatBottomPanel.add(inputRow, BorderLayout.CENTER);
 
-        centerChatColumn.add(headerPanel, BorderLayout.NORTH);
+        centerChatColumn.add(topChatStack, BorderLayout.NORTH);
         centerChatColumn.add(chatScroll, BorderLayout.CENTER);
         centerChatColumn.add(chatBottomPanel, BorderLayout.SOUTH);
 
         // =====================================================================
-        // CỘT 4: KHUNG "THÔNG TIN HỘI THOẠI" & "KHO LƯU TRỮ" BÊN PHẢI
+        // CỘT 4: KHUNG "THÔNG TIN HỘI THOẠI", "KHO LƯU TRỮ" & "THÀNH VIÊN" BÊN PHẢI
         // =====================================================================
         infoDrawerPanel = createConversationInfoDrawer();
 
@@ -640,6 +705,420 @@ public class MainClient extends JFrame {
         startNetwork();
     }
 
+    // =========================================================================
+    // THANH TIN NHẮN ĐÃ GHIM & XỬ LÝ THU HỒI / GHIM TIN NHẮN (NÚT ...)
+    // =========================================================================
+    private JPanel createPinnedBannerPanel() {
+        JPanel banner = new JPanel(new BorderLayout(10, 0));
+        banner.setBackground(new Color(245, 249, 255));
+        banner.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(212, 228, 255)),
+                new EmptyBorder(6, 14, 6, 12)
+        ));
+        banner.setMaximumSize(new Dimension(Integer.MAX_VALUE, 48));
+        banner.setVisible(false);
+
+        JLabel pinIcon = new JLabel(new ZaloIcon(ZaloIcon.Type.PIN, 18, ZALO_BLUE));
+
+        JPanel textCol = new JPanel(new GridLayout(2, 1, 0, 1));
+        textCol.setOpaque(false);
+        textCol.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
+        lblPinnedTitle = new JLabel("Tin nhắn đã ghim");
+        lblPinnedTitle.setFont(new Font("SansSerif", Font.BOLD, 12));
+        lblPinnedTitle.setForeground(ZALO_BLUE);
+
+        lblPinnedPreview = new JLabel("");
+        lblPinnedPreview.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        lblPinnedPreview.setForeground(ZALO_TEXT_DARK);
+
+        textCol.add(lblPinnedTitle);
+        textCol.add(lblPinnedPreview);
+        textCol.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (!currentPinnedMessages.isEmpty()) {
+                    scrollToAndHighlightMessage(currentPinnedMessages.get(0).msgId);
+                }
+            }
+        });
+
+        JPanel rightBtns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 2));
+        rightBtns.setOpaque(false);
+
+        btnPinnedList = new FlatButton("Danh sách (1)", Color.WHITE, ZALO_BLUE, 6);
+        btnPinnedList.setFont(new Font("SansSerif", Font.BOLD, 11));
+        btnPinnedList.setPreferredSize(new Dimension(96, 26));
+        btnPinnedList.addActionListener(e -> showPinnedListDialog());
+
+        btnUnpinBanner = new FlatButton("Bỏ ghim", new Color(230, 238, 252), ZALO_TEXT_DARK, 6);
+        btnUnpinBanner.setFont(new Font("SansSerif", Font.PLAIN, 11));
+        btnUnpinBanner.setPreferredSize(new Dimension(64, 26));
+        btnUnpinBanner.addActionListener(e -> {
+            if (!currentPinnedMessages.isEmpty()) {
+                unpinMessage(currentPinnedMessages.get(0).msgId);
+            }
+        });
+
+        rightBtns.add(btnPinnedList);
+        rightBtns.add(btnUnpinBanner);
+
+        banner.add(pinIcon, BorderLayout.WEST);
+        banner.add(textCol, BorderLayout.CENTER);
+        banner.add(rightBtns, BorderLayout.EAST);
+        return banner;
+    }
+
+    private void refreshPinnedBanner() {
+        if (pinnedBannerPanel == null) return;
+        if (currentPinnedMessages.isEmpty()) {
+            pinnedBannerPanel.setVisible(false);
+        } else {
+            PinnedMessageItem top = currentPinnedMessages.get(0);
+            int count = currentPinnedMessages.size();
+            lblPinnedTitle.setText(count > 1 ? "Tin nhắn đã ghim (" + count + ")" : "Tin nhắn đã ghim");
+            lblPinnedPreview.setText(top.senderName + ": " + top.preview);
+            btnPinnedList.setText("Danh sách (" + count + ")");
+            btnPinnedList.setVisible(count > 1);
+            pinnedBannerPanel.setVisible(true);
+        }
+        pinnedBannerPanel.revalidate();
+        pinnedBannerPanel.repaint();
+    }
+
+    private void showPinnedListDialog() {
+        if (currentPinnedMessages.isEmpty()) return;
+        JDialog dlg = new JDialog(this, "Danh sách tin nhắn đã ghim (" + currentPinnedMessages.size() + ")", true);
+        dlg.setSize(450, 380);
+        dlg.setLocationRelativeTo(this);
+        dlg.setLayout(new BorderLayout());
+        dlg.getContentPane().setBackground(Color.WHITE);
+
+        JPanel list = new JPanel();
+        list.setLayout(new BoxLayout(list, BoxLayout.Y_AXIS));
+        list.setBackground(Color.WHITE);
+        list.setBorder(new EmptyBorder(10, 12, 10, 12));
+
+        for (PinnedMessageItem item : new ArrayList<>(currentPinnedMessages)) {
+            JPanel card = new JPanel(new BorderLayout(10, 0));
+            card.setBackground(ZALO_HOVER_ITEM);
+            card.setBorder(new EmptyBorder(10, 12, 10, 12));
+            card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 64));
+
+            JPanel info = new JPanel(new GridLayout(2, 1, 0, 2));
+            info.setOpaque(false);
+            JLabel lblS = new JLabel(item.senderName);
+            lblS.setFont(new Font("SansSerif", Font.BOLD, 13));
+            lblS.setForeground(ZALO_BLUE);
+
+            JLabel lblP = new JLabel(item.preview);
+            lblP.setFont(new Font("SansSerif", Font.PLAIN, 13));
+            lblP.setForeground(ZALO_TEXT_DARK);
+            info.add(lblS);
+            info.add(lblP);
+
+            JPanel acts = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 4));
+            acts.setOpaque(false);
+
+            FlatButton btnGo = new FlatButton("Xem", ZALO_BLUE, Color.WHITE, 6);
+            btnGo.setFont(new Font("SansSerif", Font.BOLD, 11));
+            btnGo.setPreferredSize(new Dimension(56, 28));
+            btnGo.addActionListener(ev -> {
+                dlg.dispose();
+                scrollToAndHighlightMessage(item.msgId);
+            });
+
+            FlatButton btnDel = new FlatButton("Bỏ ghim", Color.WHITE, new Color(220, 53, 69), 6);
+            btnDel.setFont(new Font("SansSerif", Font.BOLD, 11));
+            btnDel.setPreferredSize(new Dimension(68, 28));
+            btnDel.addActionListener(ev -> {
+                unpinMessage(item.msgId);
+                dlg.dispose();
+                if (!currentPinnedMessages.isEmpty()) showPinnedListDialog();
+            });
+
+            acts.add(btnGo);
+            acts.add(btnDel);
+
+            card.add(info, BorderLayout.CENTER);
+            card.add(acts, BorderLayout.EAST);
+
+            list.add(card);
+            list.add(Box.createVerticalStrut(8));
+        }
+
+        JScrollPane sp = new JScrollPane(list);
+        sp.setBorder(null);
+        dlg.add(sp, BorderLayout.CENTER);
+        dlg.setVisible(true);
+    }
+
+    private void scrollToAndHighlightMessage(String msgId) {
+        ChatBubbleEntry entry = messageBubbles.get(msgId);
+        if (entry == null || entry.wrapperRow == null) {
+            JOptionPane.showMessageDialog(this, "Không tìm thấy vị trí tin nhắn này trong khung chat hiện tại.");
+            return;
+        }
+        Rectangle bounds = entry.wrapperRow.getBounds();
+        chatPanel.scrollRectToVisible(bounds);
+        entry.wrapperRow.setOpaque(true);
+        entry.wrapperRow.setBackground(new Color(255, 243, 196));
+        entry.wrapperRow.repaint();
+
+        Timer flashTimer = new Timer(1600, e -> {
+            entry.wrapperRow.setOpaque(false);
+            entry.wrapperRow.setBackground(null);
+            entry.wrapperRow.repaint();
+        });
+        flashTimer.setRepeats(false);
+        flashTimer.start();
+    }
+
+    private String generateMessageId() {
+        return System.currentTimeMillis() + "_" + msgSeq.incrementAndGet();
+    }
+
+    private String getCanonicalPinnedConvKey() {
+        if (isMulticastMode) return "LAN";
+        if (currentGroupId != -1) return "GRP_" + currentGroupId;
+        if (currentTargetUser != null) {
+            String a = currentUser;
+            String b = currentTargetUser;
+            return "USR_" + (a.compareTo(b) < 0 ? a + "_" + b : b + "_" + a);
+        }
+        return null;
+    }
+
+    private boolean isMessagePinned(String msgId) {
+        for (PinnedMessageItem item : currentPinnedMessages) {
+            if (item.msgId.equals(msgId)) return true;
+        }
+        return false;
+    }
+
+    private void showBubbleActionMenu(Component invoker, int x, int y, String msgId) {
+        ChatBubbleEntry entry = messageBubbles.get(msgId);
+        if (entry == null) return;
+
+        JPopupMenu menu = new JPopupMenu();
+        menu.setBorder(BorderFactory.createLineBorder(new Color(220, 224, 230), 1, true));
+
+        if (!entry.isRecalled) {
+            boolean alreadyPinned = isMessagePinned(msgId);
+            JMenuItem itemPin = new JMenuItem(alreadyPinned ? "Bỏ ghim tin nhắn" : "Ghim tin nhắn");
+            itemPin.setFont(new Font("SansSerif", Font.PLAIN, 13));
+            itemPin.setIcon(new ZaloIcon(ZaloIcon.Type.PIN, 15, ZALO_BLUE));
+            itemPin.addActionListener(ev -> {
+                if (alreadyPinned) unpinMessage(msgId);
+                else pinMessage(entry);
+            });
+            menu.add(itemPin);
+
+            if (entry.copyableText != null && !entry.copyableText.isEmpty()) {
+                JMenuItem itemCopy = new JMenuItem("Sao chép tin nhắn");
+                itemCopy.setFont(new Font("SansSerif", Font.PLAIN, 13));
+                itemCopy.addActionListener(ev -> {
+                    Toolkit.getDefaultToolkit().getSystemClipboard().setContents(
+                            new StringSelection(entry.copyableText), null);
+                });
+                menu.add(itemCopy);
+            }
+
+            if (entry.isMe) {
+                menu.addSeparator();
+                JMenuItem itemRecall = new JMenuItem("Thu hồi tin nhắn");
+                itemRecall.setFont(new Font("SansSerif", Font.BOLD, 13));
+                itemRecall.setForeground(new Color(220, 53, 69));
+                itemRecall.addActionListener(ev -> recallMessage(msgId));
+                menu.add(itemRecall);
+            }
+        } else {
+            JMenuItem itemInfo = new JMenuItem("Tin nhắn đã được thu hồi");
+            itemInfo.setEnabled(false);
+            menu.add(itemInfo);
+        }
+
+        menu.show(invoker, x, y);
+    }
+
+    private void attachBubbleContextMenu(JComponent target, String msgId) {
+        MouseAdapter menuAdapter = new MouseAdapter() {
+            private void maybeShowPopup(MouseEvent e) {
+                if (!e.isPopupTrigger()) return;
+                showBubbleActionMenu(e.getComponent(), e.getX(), e.getY(), msgId);
+            }
+
+            @Override
+            public void mousePressed(MouseEvent e) { maybeShowPopup(e); }
+
+            @Override
+            public void mouseReleased(MouseEvent e) { maybeShowPopup(e); }
+        };
+        attachMouseListenerRecursive(target, menuAdapter);
+    }
+
+    private void attachMouseListenerRecursive(Component comp, MouseAdapter adapter) {
+        comp.addMouseListener(adapter);
+        if (comp instanceof Container) {
+            for (Component child : ((Container) comp).getComponents()) {
+                attachMouseListenerRecursive(child, adapter);
+            }
+        }
+    }
+
+    private void pinMessage(ChatBubbleEntry entry) {
+        if (entry == null || entry.isRecalled) return;
+        String senderDisplay = entry.isMe ? currentFullname : (entry.senderName != null && !entry.senderName.isEmpty() ? entry.senderName : entry.senderUsername);
+        String cleanPreview = entry.previewText.replace(";;;", " ").replace("||", " ").replace("^", " ").replace("\n", " ").trim();
+        if (cleanPreview.length() > 90) cleanPreview = cleanPreview.substring(0, 90) + "...";
+
+        applyPinLocally(entry.msgId, senderDisplay, cleanPreview);
+
+        String convKey = getCanonicalPinnedConvKey();
+        if (convKey != null && !isMulticastMode) {
+            sendToServer("PINMSG;;;" + convKey + ";;;" + entry.msgId + ";;;" + senderDisplay + ";;;" + cleanPreview);
+        }
+
+        // Đồng bộ realtime qua P2P / Group / Multicast
+        try {
+            if (isMulticastMode && mcSocket != null) {
+                byte[] dt = ("PIN_MC:::" + entry.msgId + ":::" + senderDisplay + ":::" + cleanPreview).getBytes("UTF-8");
+                mcSocket.send(new DatagramPacket(dt, dt.length, mcGroup, 9999));
+            } else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+                String payload = currentGroupId + ":::PIN:::" + entry.msgId + ":::" + senderDisplay + ":::" + cleanPreview;
+                byte[] b = payload.getBytes("UTF-8");
+                byte[] pkt = new byte[b.length + 1];
+                pkt[0] = 14;
+                System.arraycopy(b, 0, pkt, 1, b.length);
+                for (Friend m : groups.get(currentGroupId).members) {
+                    if (!m.username.equals(currentUser) && m.isOnline()) {
+                        udpSocket.send(new DatagramPacket(pkt, pkt.length, InetAddress.getByName(m.ip), m.port));
+                    }
+                }
+            } else if (currentTargetUser != null && friends.containsKey(currentTargetUser)) {
+                String payload = "PIN:::" + entry.msgId + ":::" + senderDisplay + ":::" + cleanPreview;
+                byte[] b = payload.getBytes("UTF-8");
+                byte[] pkt = new byte[b.length + 1];
+                pkt[0] = 13;
+                System.arraycopy(b, 0, pkt, 1, b.length);
+                sendP2P(friends.get(currentTargetUser), pkt);
+            }
+        } catch (Exception e) {}
+    }
+
+    private void unpinMessage(String msgId) {
+        applyUnpinLocally(msgId);
+
+        String convKey = getCanonicalPinnedConvKey();
+        if (convKey != null && !isMulticastMode) {
+            sendToServer("UNPINMSG;;;" + convKey + ";;;" + msgId);
+        }
+
+        try {
+            if (isMulticastMode && mcSocket != null) {
+                byte[] dt = ("UNPIN_MC:::" + msgId).getBytes("UTF-8");
+                mcSocket.send(new DatagramPacket(dt, dt.length, mcGroup, 9999));
+            } else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+                String payload = currentGroupId + ":::UNPIN:::" + msgId;
+                byte[] b = payload.getBytes("UTF-8");
+                byte[] pkt = new byte[b.length + 1];
+                pkt[0] = 14;
+                System.arraycopy(b, 0, pkt, 1, b.length);
+                for (Friend m : groups.get(currentGroupId).members) {
+                    if (!m.username.equals(currentUser) && m.isOnline()) {
+                        udpSocket.send(new DatagramPacket(pkt, pkt.length, InetAddress.getByName(m.ip), m.port));
+                    }
+                }
+            } else if (currentTargetUser != null && friends.containsKey(currentTargetUser)) {
+                String payload = "UNPIN:::" + msgId;
+                byte[] b = payload.getBytes("UTF-8");
+                byte[] pkt = new byte[b.length + 1];
+                pkt[0] = 13;
+                System.arraycopy(b, 0, pkt, 1, b.length);
+                sendP2P(friends.get(currentTargetUser), pkt);
+            }
+        } catch (Exception e) {}
+    }
+
+    private void applyPinLocally(String msgId, String senderName, String preview) {
+        currentPinnedMessages.removeIf(p -> p.msgId.equals(msgId));
+        currentPinnedMessages.add(0, new PinnedMessageItem(msgId, senderName, preview));
+        refreshPinnedBanner();
+    }
+
+    private void applyUnpinLocally(String msgId) {
+        currentPinnedMessages.removeIf(p -> p.msgId.equals(msgId));
+        refreshPinnedBanner();
+    }
+
+    private void recallMessage(String msgId) {
+        ChatBubbleEntry entry = messageBubbles.get(msgId);
+        if (entry == null || !entry.isMe || entry.isRecalled) return;
+
+        applyRecallLocally(msgId);
+
+        try {
+            if (isMulticastMode && mcSocket != null) {
+                byte[] dt = ("RECALL_MC:::" + msgId).getBytes("UTF-8");
+                mcSocket.send(new DatagramPacket(dt, dt.length, mcGroup, 9999));
+            } else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+                sendToServer("RECALLGROUPMSG;;;" + currentGroupId + ";;;" + currentUser + ";;;" + msgId);
+                String payload = currentGroupId + ":::" + msgId;
+                byte[] b = payload.getBytes("UTF-8");
+                byte[] pkt = new byte[b.length + 1];
+                pkt[0] = 12;
+                System.arraycopy(b, 0, pkt, 1, b.length);
+                for (Friend m : groups.get(currentGroupId).members) {
+                    if (!m.username.equals(currentUser) && m.isOnline()) {
+                        udpSocket.send(new DatagramPacket(pkt, pkt.length, InetAddress.getByName(m.ip), m.port));
+                    }
+                }
+            } else if (currentTargetUser != null) {
+                sendToServer("RECALLMSG;;;" + currentUser + ";;;" + currentTargetUser + ";;;" + msgId);
+                if (friends.containsKey(currentTargetUser)) {
+                    byte[] b = msgId.getBytes("UTF-8");
+                    byte[] pkt = new byte[b.length + 1];
+                    pkt[0] = 11;
+                    System.arraycopy(b, 0, pkt, 1, b.length);
+                    sendP2P(friends.get(currentTargetUser), pkt);
+                }
+            }
+        } catch (Exception e) {}
+    }
+
+    private void applyRecallLocally(String msgId) {
+        applyUnpinLocally(msgId);
+        ChatBubbleEntry entry = messageBubbles.get(msgId);
+        if (entry == null || entry.isRecalled) return;
+        entry.isRecalled = true;
+
+        if (entry.btnMore != null) {
+            entry.btnMore.setVisible(false);
+        }
+        if (entry.linkedMedia != null) {
+            currentSharedImages.remove(entry.linkedMedia);
+            refreshInfoDrawer();
+        }
+        if (entry.linkedFile != null) {
+            currentSharedFiles.remove(entry.linkedFile);
+            refreshInfoDrawer();
+        }
+
+        entry.bubbleHolder.removeAll();
+        BubblePanel recalledBubble = new BubblePanel(
+                entry.isMe ? new Color(238, 244, 255) : new Color(248, 249, 250),
+                new Color(216, 222, 230)
+        );
+        JLabel lblRecalled = new JLabel("Tin nhắn đã được thu hồi");
+        lblRecalled.setFont(new Font("SansSerif", Font.ITALIC, 13));
+        lblRecalled.setForeground(new Color(130, 138, 150));
+        recalledBubble.add(lblRecalled, BorderLayout.CENTER);
+
+        entry.bubbleHolder.add(recalledBubble);
+        entry.bubbleHolder.revalidate();
+        entry.bubbleHolder.repaint();
+    }
+
     private void updateSidebarTabStyles() {
         if (!filterOnlineOnly) {
             lblTabAll.setForeground(ZALO_BLUE);
@@ -689,8 +1168,21 @@ public class MainClient extends JFrame {
         }
     }
 
+    private void openGroupMembersDrawer() {
+        if (currentGroupId == -1 || !groups.containsKey(currentGroupId)) return;
+        if (!infoDrawerPanel.isVisible()) {
+            infoDrawerPanel.setVisible(true);
+            btnToggleInfo.setBackground(ZALO_ACTIVE_ITEM);
+            btnToggleInfo.setIcon(new ZaloIcon(ZaloIcon.Type.SIDEBAR_RIGHT, 20, ZALO_BLUE));
+        }
+        refreshGroupMembersCard();
+        infoDrawerCardLayout.show(infoDrawerPanel, "MEMBERS");
+        chatContainer.revalidate();
+        chatContainer.repaint();
+    }
+
     // =========================================================================
-    // TẠO KHUNG "THÔNG TIN HỘI THOẠI" & "KHO LƯU TRỮ" GIỐNG HỆT ZALO PC
+    // TẠO KHUNG "THÔNG TIN HỘI THOẠI", "KHO LƯU TRỮ" & "THÀNH VIÊN" GIỐNG ZALO PC
     // =========================================================================
     private JPanel createConversationInfoDrawer() {
         infoDrawerCardLayout = new CardLayout();
@@ -776,7 +1268,7 @@ public class MainClient extends JFrame {
         profileCard.add(Box.createVerticalStrut(14));
         profileCard.add(quickBtns);
 
-        // Khối 2: Thông tin kết nối & Nhóm chung
+        // Khối 2: Thông tin kết nối & Thành viên / Nhóm chung
         JPanel metaCard = new JPanel();
         metaCard.setLayout(new BoxLayout(metaCard, BoxLayout.Y_AXIS));
         metaCard.setBackground(Color.WHITE);
@@ -797,12 +1289,19 @@ public class MainClient extends JFrame {
         lblInfoSub2.setFont(new Font("SansSerif", Font.PLAIN, 13));
         lblInfoSub2.setForeground(ZALO_TEXT_DARK);
         lblInfoSub2.setAlignmentX(Component.LEFT_ALIGNMENT);
+        lblInfoSub2.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        lblInfoSub2.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (currentGroupId != -1) openGroupMembersDrawer();
+            }
+        });
 
         metaCard.add(lblInfoSub1);
         metaCard.add(Box.createVerticalStrut(12));
         metaCard.add(lblInfoSub2);
 
-        // Khối 3: Ảnh/Video đã chia sẻ (lưới vuông sát nhau, không khung viền)
+        // Khối 3: Ảnh/Video đã chia sẻ
         JPanel mediaCard = new JPanel(new BorderLayout(0, 8));
         mediaCard.setBackground(Color.WHITE);
         mediaCard.setBorder(new EmptyBorder(12, 14, 12, 14));
@@ -883,9 +1382,339 @@ public class MainClient extends JFrame {
         // ---------------------------------------------------------------------
         JPanel archiveCardView = createArchiveDrawerCard();
 
+        // ---------------------------------------------------------------------
+        // THẺ 3: THÀNH VIÊN NHÓM (GIỐNG HỆT ẢNH MẪU ZALO PC)
+        // ---------------------------------------------------------------------
+        JPanel membersCardView = createGroupMembersDrawerCard();
+
         drawerRoot.add(infoCardView, "INFO");
         drawerRoot.add(archiveCardView, "ARCHIVE");
+        drawerRoot.add(membersCardView, "MEMBERS");
         return drawerRoot;
+    }
+
+    private JPanel createGroupMembersDrawerCard() {
+        JPanel membersView = new JPanel(new BorderLayout());
+        membersView.setBackground(Color.WHITE);
+
+        // Header: Nút quay lại "<" + tiêu đề "Thành viên"
+        JPanel navBar = new JPanel(new BorderLayout());
+        navBar.setBackground(Color.WHITE);
+        navBar.setPreferredSize(new Dimension(0, 66));
+        navBar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, ZALO_DIVIDER),
+                new EmptyBorder(0, 8, 0, 14)
+        ));
+
+        FlatButton btnBack = new FlatButton("‹", new Color(0, 0, 0, 0), ZALO_TEXT_DARK, 8);
+        btnBack.setFont(new Font("SansSerif", Font.PLAIN, 28));
+        btnBack.setPreferredSize(new Dimension(38, 38));
+        btnBack.setToolTipText("Quay lại Thông tin hội thoại");
+        btnBack.addActionListener(e -> showInfoDrawerMain());
+
+        JLabel lblTitle = new JLabel("Thành viên", SwingConstants.CENTER);
+        lblTitle.setFont(new Font("SansSerif", Font.BOLD, 16));
+        lblTitle.setForeground(ZALO_TEXT_DARK);
+
+        JLabel dummyRight = new JLabel();
+        dummyRight.setPreferredSize(new Dimension(38, 38));
+
+        navBar.add(btnBack, BorderLayout.WEST);
+        navBar.add(lblTitle, BorderLayout.CENTER);
+        navBar.add(dummyRight, BorderLayout.EAST);
+
+        // Body cuộn
+        JPanel body = new DrawerBodyPanel();
+        body.setLayout(new BoxLayout(body, BoxLayout.Y_AXIS));
+        body.setBackground(Color.WHITE);
+        body.setBorder(new EmptyBorder(14, 14, 14, 14));
+
+        // Nút "Thêm thành viên" lớn ở đầu giống hệt ảnh Zalo PC
+        FlatButton btnAddMember = new FlatButton("  Thêm thành viên", ZALO_HOVER_ITEM, ZALO_TEXT_DARK, 8);
+        btnAddMember.setIcon(new ZaloIcon(ZaloIcon.Type.ADD_FRIEND, 18, ZALO_TEXT_DARK));
+        btnAddMember.setFont(new Font("SansSerif", Font.BOLD, 13));
+        btnAddMember.setAlignmentX(Component.LEFT_ALIGNMENT);
+        btnAddMember.setMaximumSize(new Dimension(Integer.MAX_VALUE, 38));
+        btnAddMember.setPreferredSize(new Dimension(0, 38));
+        btnAddMember.addActionListener(e -> showAddGroupMemberDialog());
+
+        // Hàng tiêu đề "Danh sách thành viên (X)" + nút "..."
+        JPanel listHeaderRow = new JPanel(new BorderLayout());
+        listHeaderRow.setOpaque(false);
+        listHeaderRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+        listHeaderRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+        listHeaderRow.setBorder(new EmptyBorder(12, 2, 6, 2));
+
+        lblMembersSectionTitle = new JLabel("Danh sách thành viên (0)");
+        lblMembersSectionTitle.setFont(new Font("SansSerif", Font.BOLD, 13));
+        lblMembersSectionTitle.setForeground(ZALO_TEXT_DARK);
+
+        JLabel lblDots = new JLabel("•••");
+        lblDots.setFont(new Font("SansSerif", Font.BOLD, 12));
+        lblDots.setForeground(ZALO_ICON_GRAY);
+
+        listHeaderRow.add(lblMembersSectionTitle, BorderLayout.WEST);
+        listHeaderRow.add(lblDots, BorderLayout.EAST);
+
+        pnlGroupMembersList = new JPanel();
+        pnlGroupMembersList.setLayout(new BoxLayout(pnlGroupMembersList, BoxLayout.Y_AXIS));
+        pnlGroupMembersList.setOpaque(false);
+        pnlGroupMembersList.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        // Nút "Rời nhóm" ngay dưới danh sách thành viên
+        FlatButton btnLeaveGroup = new FlatButton("  Rời nhóm", new Color(255, 238, 240), new Color(220, 53, 69), 8);
+        btnLeaveGroup.setIcon(new ZaloIcon(ZaloIcon.Type.NAV_LOGOUT, 16, new Color(220, 53, 69)));
+        btnLeaveGroup.setFont(new Font("SansSerif", Font.BOLD, 13));
+        btnLeaveGroup.setAlignmentX(Component.LEFT_ALIGNMENT);
+        btnLeaveGroup.setMaximumSize(new Dimension(Integer.MAX_VALUE, 38));
+        btnLeaveGroup.setPreferredSize(new Dimension(0, 38));
+        btnLeaveGroup.addActionListener(e -> confirmLeaveCurrentGroup());
+
+        body.add(btnAddMember);
+        body.add(listHeaderRow);
+        body.add(pnlGroupMembersList);
+        body.add(Box.createVerticalStrut(14));
+        body.add(btnLeaveGroup);
+        body.add(Box.createVerticalGlue());
+
+        JScrollPane scroll = new JScrollPane(body);
+        scroll.setBorder(null);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+
+        membersView.add(navBar, BorderLayout.NORTH);
+        membersView.add(scroll, BorderLayout.CENTER);
+        return membersView;
+    }
+    private void confirmLeaveCurrentGroup() {
+        if (currentGroupId == -1 || !groups.containsKey(currentGroupId)) return;
+        Group g = groups.get(currentGroupId);
+
+        int confirm = JOptionPane.showConfirmDialog(
+                this,
+                "Bạn có chắc chắn muốn rời khỏi nhóm \"" + g.name + "\" không?",
+                "Rời nhóm",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE
+        );
+        if (confirm != JOptionPane.YES_OPTION) return;
+
+        int leavingGroupId = currentGroupId;
+        sendToServer("LEAVEGROUP;;;" + leavingGroupId + ";;;" + currentUser);
+        groups.remove(leavingGroupId);
+        pinnedConversations.remove("GRP_" + leavingGroupId);
+        mutedConversations.remove("GRP_" + leavingGroupId);
+
+        currentGroupId = -1;
+        currentTargetUser = null;
+        btnGroupMembers.setVisible(false);
+        txtChat.setEnabled(false);
+        btnSend.setEnabled(false);
+        btnIcon.setEnabled(false);
+        btnCall.setEnabled(false);
+        btnVideoHeader.setEnabled(false);
+        btnRecord.setEnabled(false);
+        btnImg.setEnabled(false);
+        btnFile.setEnabled(false);
+
+        lblTarget.setText("Chào mừng đến với Z-Voice");
+        lblTargetStatus.setText("Chọn bạn bè hoặc tạo nhóm để bắt đầu trò chuyện");
+        lblTargetStatus.setForeground(new Color(110, 118, 130));
+        targetAvatarHeader.setImage(null);
+        targetAvatarHeader.setAvatarText("Z");
+        targetAvatarHeader.setBackground(ZALO_BLUE);
+        targetAvatarHeader.setOnlineStatus(false, false);
+
+        chatPanel.removeAll();
+        chatPanel.revalidate();
+        chatPanel.repaint();
+        resetConversationViewState();
+        showInfoDrawerMain();
+        refreshInfoDrawer();
+
+        lastDataSync = "";
+        sendToServer("GETDATA;;;" + currentUser);
+        renderConversationList();
+    }
+
+    private void refreshGroupMembersCard() {
+        if (pnlGroupMembersList == null || lblMembersSectionTitle == null) return;
+        pnlGroupMembersList.removeAll();
+
+        if (currentGroupId == -1 || !groups.containsKey(currentGroupId)) {
+            lblMembersSectionTitle.setText("Danh sách thành viên (0)");
+            pnlGroupMembersList.revalidate();
+            pnlGroupMembersList.repaint();
+            return;
+        }
+
+        Group g = groups.get(currentGroupId);
+        lblMembersSectionTitle.setText("Danh sách thành viên (" + g.members.size() + ")");
+
+        for (int i = 0; i < g.members.size(); i++) {
+            Friend m = g.members.get(i);
+            boolean isMe = m.username.equals(currentUser);
+            String displayName = isMe ? "Bạn" : m.name;
+            String roleText;
+            if (i == 0) {
+                roleText = isMe ? "Trưởng nhóm • Đang hoạt động" : (m.isOnline() ? "Trưởng nhóm • Đang hoạt động" : "Trưởng nhóm");
+            } else {
+                roleText = (isMe || m.isOnline()) ? "Đang hoạt động" : "Ngoại tuyến";
+            }
+
+            JPanel row = new JPanel(new BorderLayout(10, 0));
+            row.setBackground(Color.WHITE);
+            row.setBorder(new EmptyBorder(7, 4, 7, 4));
+            row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
+            row.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+            String initStr = (m.name != null && !m.name.isEmpty()) ? m.name.substring(0, 1).toUpperCase() : "?";
+            RoundAvatar av = new RoundAvatar(initStr);
+            av.setPreferredSize(new Dimension(40, 40));
+            av.setBackground(i == 0 ? new Color(0, 150, 136) : ZALO_BLUE);
+            av.setForeground(Color.WHITE);
+            av.setFont(new Font("SansSerif", Font.BOLD, 15));
+            av.setOnlineStatus(true, isMe || m.isOnline());
+
+            if (isMe && currentAvatarBase64 != null && !currentAvatarBase64.isEmpty()) {
+                try {
+                    byte[] imgBytes = Base64.getDecoder().decode(currentAvatarBase64);
+                    av.setImage(ImageIO.read(new ByteArrayInputStream(imgBytes)));
+                    av.setAvatarText("");
+                } catch (Exception ex) {}
+            } else if (avatarCache.containsKey(m.username)) {
+                av.setImage(avatarCache.get(m.username));
+                av.setAvatarText("");
+            }
+
+            JPanel textCol = new JPanel(new GridLayout(2, 1, 0, 1));
+            textCol.setOpaque(false);
+
+            JLabel lblName = new JLabel(displayName);
+            lblName.setFont(new Font("SansSerif", Font.BOLD, 13));
+            lblName.setForeground(ZALO_TEXT_DARK);
+
+            JLabel lblRole = new JLabel(roleText);
+            lblRole.setFont(new Font("SansSerif", Font.PLAIN, 11));
+            lblRole.setForeground((isMe || m.isOnline()) ? new Color(46, 160, 95) : new Color(130, 138, 150));
+
+            textCol.add(lblName);
+            textCol.add(lblRole);
+
+            row.add(av, BorderLayout.WEST);
+            row.add(textCol, BorderLayout.CENTER);
+
+            row.addMouseListener(new MouseAdapter() {
+                @Override
+                public void mouseEntered(MouseEvent e) { row.setBackground(ZALO_HOVER_ITEM); }
+                @Override
+                public void mouseExited(MouseEvent e) { row.setBackground(Color.WHITE); }
+            });
+
+            pnlGroupMembersList.add(row);
+        }
+
+        pnlGroupMembersList.revalidate();
+        pnlGroupMembersList.repaint();
+    }
+
+    private void showAddGroupMemberDialog() {
+        if (currentGroupId == -1 || !groups.containsKey(currentGroupId)) return;
+        Group g = groups.get(currentGroupId);
+        Set<String> existingUsernames = new HashSet<>();
+        for (Friend m : g.members) existingUsernames.add(m.username);
+
+        List<Friend> candidates = new ArrayList<>();
+        for (Friend f : friends.values()) {
+            if (!existingUsernames.contains(f.username)) candidates.add(f);
+        }
+
+        if (candidates.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Tất cả bạn bè của bạn đều đã có mặt trong nhóm này!", "Thêm thành viên", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        JDialog dlg = new JDialog(this, "Thêm thành viên vào \"" + g.name + "\"", true);
+        dlg.setSize(380, 420);
+        dlg.setLocationRelativeTo(this);
+        dlg.setLayout(new BorderLayout());
+        dlg.getContentPane().setBackground(Color.WHITE);
+
+        JLabel lblHint = new JLabel("Chọn bạn bè muốn mời thêm vào nhóm:");
+        lblHint.setFont(new Font("SansSerif", Font.BOLD, 13));
+        lblHint.setForeground(ZALO_TEXT_DARK);
+        lblHint.setBorder(new EmptyBorder(14, 16, 10, 16));
+
+        JPanel listPanel = new JPanel();
+        listPanel.setLayout(new BoxLayout(listPanel, BoxLayout.Y_AXIS));
+        listPanel.setBackground(Color.WHITE);
+
+        Map<String, JCheckBox> cbs = new LinkedHashMap<>();
+        for (Friend f : candidates) {
+            JPanel row = new JPanel(new BorderLayout(10, 0));
+            row.setBackground(Color.WHITE);
+            row.setBorder(new EmptyBorder(8, 16, 8, 16));
+            row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 50));
+
+            RoundAvatar av = new RoundAvatar(f.name.substring(0, 1).toUpperCase());
+            av.setPreferredSize(new Dimension(36, 36));
+            av.setBackground(ZALO_BLUE);
+            av.setForeground(Color.WHITE);
+            if (avatarCache.containsKey(f.username)) {
+                av.setImage(avatarCache.get(f.username));
+                av.setAvatarText("");
+            }
+
+            JCheckBox cb = new JCheckBox(f.name + " (@" + f.username + ")");
+            cb.setFont(new Font("SansSerif", Font.PLAIN, 13));
+            cb.setOpaque(false);
+            cbs.put(f.username, cb);
+
+            row.add(av, BorderLayout.WEST);
+            row.add(cb, BorderLayout.CENTER);
+            listPanel.add(row);
+        }
+
+        JScrollPane sp = new JScrollPane(listPanel);
+        sp.setBorder(BorderFactory.createMatteBorder(1, 0, 1, 0, ZALO_DIVIDER));
+
+        JPanel bottom = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 10));
+        bottom.setBackground(Color.WHITE);
+        FlatButton btnCancel = new FlatButton("Hủy", ZALO_HOVER_ITEM, ZALO_TEXT_DARK, 8);
+        btnCancel.setPreferredSize(new Dimension(76, 34));
+        btnCancel.addActionListener(e -> dlg.dispose());
+
+        FlatButton btnOk = new FlatButton("Xác nhận", ZALO_BLUE, Color.WHITE, 8);
+        btnOk.setPreferredSize(new Dimension(96, 34));
+        btnOk.addActionListener(e -> {
+            List<String> picked = new ArrayList<>();
+            for (Map.Entry<String, JCheckBox> entry : cbs.entrySet()) {
+                if (entry.getValue().isSelected()) {
+                    picked.add(entry.getKey());
+                    Friend addedF = friends.get(entry.getKey());
+                    if (addedF != null) g.members.add(addedF);
+                }
+            }
+            if (picked.isEmpty()) {
+                JOptionPane.showMessageDialog(dlg, "Vui lòng chọn ít nhất 1 người bạn!");
+                return;
+            }
+            sendToServer("ADDGROUPMEMBER;;;" + g.id + ";;;" + String.join(",", picked));
+            lastDataSync = "";
+            sendToServer("GETDATA;;;" + currentUser);
+            refreshGroupMembersCard();
+            refreshInfoDrawer();
+            renderConversationList();
+            dlg.dispose();
+        });
+
+        bottom.add(btnCancel);
+        bottom.add(btnOk);
+
+        dlg.add(lblHint, BorderLayout.NORTH);
+        dlg.add(sp, BorderLayout.CENTER);
+        dlg.add(bottom, BorderLayout.SOUTH);
+        dlg.setVisible(true);
     }
 
     private JPanel createArchiveDrawerCard() {
@@ -1173,7 +2002,11 @@ public class MainClient extends JFrame {
         return null;
     }
 
-    private void resetSharedMediaState() {
+    private void resetConversationViewState() {
+        messageBubbles.clear();
+        legacyCounter = 0;
+        currentPinnedMessages.clear();
+        refreshPinnedBanner();
         currentSharedImages.clear();
         currentSharedFiles.clear();
         currentSharedLinks.clear();
@@ -1331,6 +2164,7 @@ public class MainClient extends JFrame {
             }
         }
 
+        refreshGroupMembersCard();
         refreshArchiveView();
         infoDrawerPanel.revalidate();
         infoDrawerPanel.repaint();
@@ -1596,17 +2430,6 @@ public class MainClient extends JFrame {
         dialog.setVisible(true);
     }
 
-    private void showCurrentGroupMembers() {
-        if (currentGroupId == -1 || !groups.containsKey(currentGroupId)) return;
-        Group g = groups.get(currentGroupId);
-        StringBuilder sb = new StringBuilder("Danh sách thành viên nhóm \"" + g.name + "\":\n\n");
-        for (Friend m : g.members) {
-            String st = m.username.equals(currentUser) ? "Bạn (Đang hoạt động)" : (m.isOnline() ? "Đang hoạt động" : "Ngoại tuyến");
-            sb.append("• ").append(m.name).append(" (@").append(m.username).append(") - ").append(st).append("\n");
-        }
-        JOptionPane.showMessageDialog(this, sb.toString(), "Thành viên nhóm", JOptionPane.INFORMATION_MESSAGE);
-    }
-
     private void updateAvatarDisplay() {
         try {
             if (currentAvatarBase64 != null && !currentAvatarBase64.isEmpty()) {
@@ -1621,38 +2444,157 @@ public class MainClient extends JFrame {
         } catch (Exception e) {}
     }
 
+    // =========================================================================
+    // GIAO DIỆN CẬP NHẬT HỒ SƠ & AVATAR HIỆN ĐẠI CHUẨN ZALO PC
+    // =========================================================================
     private void showProfileDialog() {
-        JPanel p = new JPanel(new BorderLayout(10, 10));
-        JTextField nameField = new JTextField(currentFullname);
-        JButton btnPickImg = new JButton("Chọn ảnh đại diện");
+        JDialog dlg = new JDialog(this, "Cập nhật thông tin cá nhân", true);
+        dlg.setSize(410, 420);
+        dlg.setLocationRelativeTo(this);
+        dlg.setLayout(new BorderLayout());
+        dlg.getContentPane().setBackground(Color.WHITE);
+
+        // Banner xanh trên cùng + Avatar tròn nổi bật ở giữa
+        JPanel topBanner = new JPanel();
+        topBanner.setLayout(new BoxLayout(topBanner, BoxLayout.Y_AXIS));
+        topBanner.setBackground(new Color(242, 247, 255));
+        topBanner.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, ZALO_DIVIDER),
+                new EmptyBorder(22, 20, 20, 20)
+        ));
+
+        RoundAvatar previewAvatar = new RoundAvatar(currentUser.substring(0, 1).toUpperCase());
+        previewAvatar.setPreferredSize(new Dimension(92, 92));
+        previewAvatar.setMaximumSize(new Dimension(92, 92));
+        previewAvatar.setBackground(ZALO_BLUE);
+        previewAvatar.setForeground(Color.WHITE);
+        previewAvatar.setFont(new Font("SansSerif", Font.BOLD, 34));
+        previewAvatar.setAlignmentX(Component.CENTER_ALIGNMENT);
+        previewAvatar.setCursor(new Cursor(Cursor.HAND_CURSOR));
+
         final String[] newAvatar = {currentAvatarBase64};
-        btnPickImg.addActionListener(e -> {
+        if (currentAvatarBase64 != null && !currentAvatarBase64.isEmpty()) {
+            try {
+                byte[] imgBytes = Base64.getDecoder().decode(currentAvatarBase64);
+                BufferedImage img = ImageIO.read(new ByteArrayInputStream(imgBytes));
+                if (img != null) {
+                    previewAvatar.setImage(img);
+                    previewAvatar.setAvatarText("");
+                }
+            } catch (Exception ex) {}
+        }
+
+        FlatButton btnPickImg = new FlatButton("  Đổi ảnh đại diện", Color.WHITE, ZALO_BLUE, 18);
+        btnPickImg.setIcon(new ZaloIcon(ZaloIcon.Type.IMAGE, 16, ZALO_BLUE));
+        btnPickImg.setFont(new Font("SansSerif", Font.BOLD, 12));
+        btnPickImg.setAlignmentX(Component.CENTER_ALIGNMENT);
+        btnPickImg.setMaximumSize(new Dimension(165, 34));
+        btnPickImg.setPreferredSize(new Dimension(165, 34));
+
+        Runnable chooseAvatarAction = () -> {
             JFileChooser fc = new JFileChooser();
-            if (fc.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            if (fc.showOpenDialog(dlg) == JFileChooser.APPROVE_OPTION) {
                 try {
-                    BufferedImage img = ImageIO.read(fc.getSelectedFile());
-                    Image scaled = img.getScaledInstance(150, 150, Image.SCALE_SMOOTH);
-                    BufferedImage bimg = new BufferedImage(150, 150, BufferedImage.TYPE_INT_RGB);
+                    BufferedImage raw = ImageIO.read(fc.getSelectedFile());
+                    if (raw == null) {
+                        JOptionPane.showMessageDialog(dlg, "Tệp được chọn không phải hình ảnh hợp lệ!");
+                        return;
+                    }
+                    // Cắt vuông chính giữa để ảnh đại diện không bị méo tỷ lệ
+                    int crop = Math.min(raw.getWidth(), raw.getHeight());
+                    BufferedImage square = raw.getSubimage((raw.getWidth() - crop) / 2, (raw.getHeight() - crop) / 2, crop, crop);
+
+                    BufferedImage bimg = new BufferedImage(180, 180, BufferedImage.TYPE_INT_RGB);
                     Graphics2D g2d = bimg.createGraphics();
-                    g2d.drawImage(scaled, 0, 0, null);
+                    g2d.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                    g2d.drawImage(square, 0, 0, 180, 180, null);
                     g2d.dispose();
+
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     ImageIO.write(bimg, "jpg", baos);
                     newAvatar[0] = Base64.getEncoder().encodeToString(baos.toByteArray());
-                    JOptionPane.showMessageDialog(this, "Đã nạp ảnh");
-                } catch (Exception ex) {}
+
+                    previewAvatar.setImage(bimg);
+                    previewAvatar.setAvatarText("");
+                    previewAvatar.repaint();
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(dlg, "Không thể đọc ảnh đại diện!");
+                }
             }
+        };
+
+        btnPickImg.addActionListener(e -> chooseAvatarAction.run());
+        previewAvatar.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) { chooseAvatarAction.run(); }
         });
-        p.add(new JLabel("Tên hiển thị:"), BorderLayout.WEST);
-        p.add(nameField, BorderLayout.CENTER);
-        p.add(btnPickImg, BorderLayout.SOUTH);
-        if (JOptionPane.showConfirmDialog(this, p, "Cập nhật hồ sơ Zalo", JOptionPane.OK_CANCEL_OPTION) == JOptionPane.OK_OPTION) {
-            sendToServer("UPDATE;;;" + currentUser + ";;;" + nameField.getText() + ";;;" + newAvatar[0]);
-            currentFullname = nameField.getText();
+
+        topBanner.add(previewAvatar);
+        topBanner.add(Box.createVerticalStrut(12));
+        topBanner.add(btnPickImg);
+
+        // Khu vực nhập thông tin
+        JPanel formPanel = new JPanel();
+        formPanel.setLayout(new BoxLayout(formPanel, BoxLayout.Y_AXIS));
+        formPanel.setBackground(Color.WHITE);
+        formPanel.setBorder(new EmptyBorder(18, 24, 14, 24));
+
+        JLabel lblNameTitle = new JLabel("Tên hiển thị");
+        lblNameTitle.setFont(new Font("SansSerif", Font.BOLD, 13));
+        lblNameTitle.setForeground(ZALO_TEXT_DARK);
+        lblNameTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JTextField nameField = new JTextField(currentFullname);
+        nameField.setFont(new Font("SansSerif", Font.PLAIN, 14));
+        nameField.setPreferredSize(new Dimension(0, 38));
+        nameField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 38));
+        nameField.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel lblUserInfo = new JLabel("Tài khoản đăng nhập: @" + currentUser);
+        lblUserInfo.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        lblUserInfo.setForeground(new Color(120, 128, 140));
+        lblUserInfo.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        formPanel.add(lblNameTitle);
+        formPanel.add(Box.createVerticalStrut(6));
+        formPanel.add(nameField);
+        formPanel.add(Box.createVerticalStrut(12));
+        formPanel.add(lblUserInfo);
+
+        // Thanh nút bấm dưới cùng
+        JPanel bottomBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 10, 12));
+        bottomBar.setBackground(Color.WHITE);
+        bottomBar.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, ZALO_DIVIDER));
+
+        FlatButton btnCancel = new FlatButton("Hủy", ZALO_HOVER_ITEM, ZALO_TEXT_DARK, 8);
+        btnCancel.setFont(new Font("SansSerif", Font.BOLD, 13));
+        btnCancel.setPreferredSize(new Dimension(84, 36));
+        btnCancel.addActionListener(e -> dlg.dispose());
+
+        FlatButton btnSave = new FlatButton("Cập nhật", ZALO_BLUE, Color.WHITE, 8);
+        btnSave.setFont(new Font("SansSerif", Font.BOLD, 13));
+        btnSave.setPreferredSize(new Dimension(105, 36));
+        btnSave.addActionListener(e -> {
+            String newName = nameField.getText().trim();
+            if (newName.isEmpty()) {
+                JOptionPane.showMessageDialog(dlg, "Tên hiển thị không được để trống!");
+                return;
+            }
+            sendToServer("UPDATE;;;" + currentUser + ";;;" + newName + ";;;" + (newAvatar[0] == null ? "" : newAvatar[0]));
+            currentFullname = newName;
             currentAvatarBase64 = newAvatar[0];
             updateAvatarDisplay();
             setTitle("Z-Voice - " + currentFullname);
-        }
+            dlg.dispose();
+        });
+
+        bottomBar.add(btnCancel);
+        bottomBar.add(btnSave);
+
+        dlg.add(topBanner, BorderLayout.NORTH);
+        dlg.add(formPanel, BorderLayout.CENTER);
+        dlg.add(bottomBar, BorderLayout.SOUTH);
+        dlg.setVisible(true);
     }
 
     private void showRequestDialog() { requestDialog.setVisible(true); }
@@ -1703,6 +2645,19 @@ public class MainClient extends JFrame {
         return null;
     }
 
+    private Friend findUserInFriendsOrGroups(String username, String fallbackIp, int fallbackPort) {
+        if (username != null && friends.containsKey(username)) return friends.get(username);
+        for (Group g : groups.values()) {
+            for (Friend m : g.members) {
+                if (m.username.equals(username)) return m;
+            }
+        }
+        if (username != null && fallbackIp != null) {
+            return new Friend(username, username, fallbackIp, fallbackPort);
+        }
+        return null;
+    }
+
     private void listenData() {
         byte[] buffer = new byte[65507];
         while (isRunning) {
@@ -1714,7 +2669,9 @@ public class MainClient extends JFrame {
                     SwingUtilities.invokeLater(() -> processServerMsg(s));
                 } else {
                     int type = buffer[0];
-                    Friend senderF = getFriendByIp(packet.getAddress().getHostAddress(), packet.getPort());
+                    String senderIp = packet.getAddress().getHostAddress();
+                    int senderPort = packet.getPort();
+                    Friend senderF = getFriendByIp(senderIp, senderPort);
 
                     if (type == 0 && isCalling && speaker != null) {
                         speaker.write(buffer, 1, packet.getLength() - 1);
@@ -1763,6 +2720,7 @@ public class MainClient extends JFrame {
 
                         if (received >= total) {
                             byte[] finalData = fullData.clone();
+                            String mediaMsgId = String.valueOf(id);
                             if (type == 8) {
                                 saveMediaToLocal("img_" + id + ".dat", finalData);
                             } else if (type == 9) {
@@ -1780,15 +2738,143 @@ public class MainClient extends JFrame {
 
                             SwingUtilities.invokeLater(() -> {
                                 if (!isMulticastMode && currentGroupId == -1 && currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
-                                    if (type == 3) appendAudioMsg(senderF.username, senderF.name, finalData, false);
-                                    else if (type == 8) appendImageMsg(senderF.username, senderF.name, finalData, false, id);
-                                    else if (type == 9) appendFileMsg(senderF.username, senderF.name, finalData, false);
+                                    if (type == 3) appendAudioMsg(mediaMsgId, senderF.username, senderF.name, finalData, false);
+                                    else if (type == 8) appendImageMsg(mediaMsgId, senderF.username, senderF.name, finalData, false, id);
+                                    else if (type == 9) appendFileMsg(mediaMsgId, senderF.username, senderF.name, finalData, false);
                                 }
                             });
                             incomingData.remove(id); incomingDataReceived.remove(id);
                         }
                     }
-                    else if (type == 4 && senderF != null) SwingUtilities.invokeLater(() -> handleIncomingCall(senderF.username));
+                    // Nhận Ảnh / File / Voice trong Nhóm Chat (type 15 = Voice, 16 = Image, 17 = File)
+                    else if (type == 15 || type == 16 || type == 17) {
+                        ByteBuffer bb = ByteBuffer.wrap(buffer, 1, packet.getLength() - 1);
+                        int gId = bb.getInt();
+                        long id = bb.getLong();
+                        int total = bb.getInt();
+                        int offset = bb.getInt();
+                        int userLen = bb.getInt();
+                        byte[] uBytes = new byte[userLen];
+                        bb.get(uBytes);
+                        String sUser = new String(uBytes, "UTF-8");
+
+                        int nameLen = bb.getInt();
+                        byte[] nBytes = new byte[nameLen];
+                        bb.get(nBytes);
+                        String sName = new String(nBytes, "UTF-8");
+
+                        int headerSize = 1 + 4 + 8 + 4 + 4 + 4 + userLen + 4 + nameLen;
+                        int dataLen = packet.getLength() - headerSize;
+                        if (dataLen > 0) {
+                            if (!incomingData.containsKey(id)) {
+                                incomingData.put(id, new byte[total]);
+                                incomingDataReceived.put(id, 0);
+                            }
+                            byte[] fullData = incomingData.get(id);
+                            System.arraycopy(buffer, headerSize, fullData, offset, dataLen);
+                            int received = incomingDataReceived.get(id) + dataLen;
+                            incomingDataReceived.put(id, received);
+
+                            if (received >= total) {
+                                byte[] finalData = fullData.clone();
+                                String mediaMsgId = String.valueOf(id);
+                                if (type == 16) {
+                                    saveMediaToLocal("img_" + id + ".dat", finalData);
+                                } else if (type == 17) {
+                                    try {
+                                        ByteBuffer fbb = ByteBuffer.wrap(finalData);
+                                        int fnLen = fbb.getInt();
+                                        byte[] fnBytes = new byte[fnLen];
+                                        fbb.get(fnBytes);
+                                        String fName = new String(fnBytes, "UTF-8");
+                                        byte[] fBytes = new byte[finalData.length - 4 - fnLen];
+                                        fbb.get(fBytes);
+                                        saveMediaToLocal("file_" + id + "_" + fName, fBytes);
+                                    } catch (Exception ex) {}
+                                }
+
+                                SwingUtilities.invokeLater(() -> {
+                                    if (!isMulticastMode && currentGroupId == gId && !sUser.equals(currentUser)) {
+                                        if (type == 15) appendAudioMsg(mediaMsgId, sUser, sName, finalData, false);
+                                        else if (type == 16) appendImageMsg(mediaMsgId, sUser, sName, finalData, false, id);
+                                        else if (type == 17) appendFileMsg(mediaMsgId, sUser, sName, finalData, false);
+                                    }
+                                });
+                                incomingData.remove(id);
+                                incomingDataReceived.remove(id);
+                            }
+                        }
+                    }
+                    else if (type == 11 && senderF != null) {
+                        String targetMsgId = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
+                        SwingUtilities.invokeLater(() -> {
+                            if (!isMulticastMode && currentGroupId == -1 && currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
+                                applyRecallLocally(targetMsgId);
+                            }
+                        });
+                    }
+                    else if (type == 12) {
+                        String raw = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
+                        String[] p = raw.split(":::", 2);
+                        if (p.length == 2) {
+                            int gId = Integer.parseInt(p[0]);
+                            String targetMsgId = p[1];
+                            SwingUtilities.invokeLater(() -> {
+                                if (!isMulticastMode && currentGroupId == gId) {
+                                    applyRecallLocally(targetMsgId);
+                                }
+                            });
+                        }
+                    }
+                    else if (type == 13 && senderF != null) {
+                        String raw = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
+                        SwingUtilities.invokeLater(() -> {
+                            if (!isMulticastMode && currentGroupId == -1 && currentTargetUser != null && currentTargetUser.equals(senderF.username)) {
+                                if (raw.startsWith("PIN:::")) {
+                                    String[] p = raw.split(":::", 4);
+                                    if (p.length == 4) applyPinLocally(p[1], p[2], p[3]);
+                                } else if (raw.startsWith("UNPIN:::")) {
+                                    String[] p = raw.split(":::", 2);
+                                    if (p.length == 2) applyUnpinLocally(p[1]);
+                                }
+                            }
+                        });
+                    }
+                    else if (type == 14) {
+                        String raw = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
+                        String[] p = raw.split(":::", 5);
+                        if (p.length >= 3) {
+                            int gId = Integer.parseInt(p[0]);
+                            String action = p[1];
+                            SwingUtilities.invokeLater(() -> {
+                                if (!isMulticastMode && currentGroupId == gId) {
+                                    if ("PIN".equals(action) && p.length == 5) applyPinLocally(p[2], p[3], p[4]);
+                                    else if ("UNPIN".equals(action)) applyUnpinLocally(p[2]);
+                                }
+                            });
+                        }
+                    }
+                    // Cuộc gọi nhóm đến (type 18)
+                    else if (type == 18) {
+                        String raw = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
+                        String[] p = raw.split(":::", 3);
+                        if (p.length == 3) {
+                            int gId = Integer.parseInt(p[0]);
+                            String callerUser = p[1];
+                            String callerName = p[2];
+                            SwingUtilities.invokeLater(() -> handleIncomingGroupCall(gId, callerUser, callerName));
+                        }
+                    }
+                    else if (type == 4) {
+                        String callerUser = senderF != null ? senderF.username : null;
+                        if (callerUser == null && packet.getLength() > 1) {
+                            callerUser = new String(buffer, 1, packet.getLength() - 1, "UTF-8");
+                        }
+                        if (callerUser != null) {
+                            final String finalCaller = callerUser;
+                            SwingUtilities.invokeLater(() -> handleIncomingCall(finalCaller, senderIp, senderPort));
+                        }
+                    }
                     else if (type == 5) SwingUtilities.invokeLater(this::handleCallAccepted);
                     else if (type == 6) SwingUtilities.invokeLater(this::handleCallDeclined);
                     else if (type == 7) SwingUtilities.invokeLater(this::handleCallEnded);
@@ -1798,11 +2884,37 @@ public class MainClient extends JFrame {
     }
 
     private void processServerMsg(String s) {
+        if (s.startsWith("FORCE_SYNC;;;")) {
+            lastDataSync = "";
+            sendToServer("GETDATA;;;" + currentUser);
+            return;
+        }
         if (s.startsWith("CREATEGROUP_OK;;;")) {
             String[] p = s.split(";;;");
             if (p.length >= 3) {
                 JOptionPane.showMessageDialog(this, "Đã tạo nhóm \"" + p[2] + "\" thành công!", "Z-Voice Nhóm", JOptionPane.INFORMATION_MESSAGE);
             }
+            return;
+        }
+
+        if (s.startsWith("PINDATA;;;")) {
+            String[] p = s.split(";;;", 3);
+            if (p.length < 3) return;
+            String activeKey = getCanonicalPinnedConvKey();
+            if (activeKey == null || !activeKey.equals(p[1])) return;
+
+            currentPinnedMessages.clear();
+            String listStr = p[2];
+            if (!listStr.isEmpty()) {
+                for (String item : listStr.split("\\|\\|")) {
+                    if (item.isEmpty()) continue;
+                    String[] fields = item.split("\\^", 3);
+                    if (fields.length == 3) {
+                        currentPinnedMessages.add(new PinnedMessageItem(fields[0], fields[1], fields[2]));
+                    }
+                }
+            }
+            refreshPinnedBanner();
             return;
         }
 
@@ -1814,7 +2926,13 @@ public class MainClient extends JFrame {
 
             String data = p[2];
             chatPanel.removeAll();
-            resetSharedMediaState();
+            messageBubbles.clear();
+            legacyCounter = 0;
+            currentSharedImages.clear();
+            currentSharedFiles.clear();
+            currentSharedLinks.clear();
+            refreshInfoDrawer();
+
             if (!data.isEmpty()) {
                 for (String m : data.split("\\|\\|")) {
                     if (m.isEmpty()) continue;
@@ -1841,7 +2959,13 @@ public class MainClient extends JFrame {
 
             String data = s.substring(10);
             chatPanel.removeAll();
-            resetSharedMediaState();
+            messageBubbles.clear();
+            legacyCounter = 0;
+            currentSharedImages.clear();
+            currentSharedFiles.clear();
+            currentSharedLinks.clear();
+            refreshInfoDrawer();
+
             if (!data.isEmpty()) {
                 for (String m : data.split("\\|\\|")) {
                     if (m.isEmpty()) continue;
@@ -2045,7 +3169,6 @@ public class MainClient extends JFrame {
             pnlConversationList.add(lblHeader);
         }
 
-        // Hiển thị hội thoại được Ghim lên đầu trước
         for (Group grp : groups.values()) {
             if (!pinnedConversations.contains("GRP_" + grp.id)) continue;
             if (!keyword.isEmpty() && !grp.name.toLowerCase().contains(keyword)) continue;
@@ -2058,7 +3181,6 @@ public class MainClient extends JFrame {
             pnlConversationList.add(createFriendListItem(friendObj, avatarCache.get(friendObj.username), true));
         }
 
-        // Các hội thoại còn lại
         for (Group grp : groups.values()) {
             if (pinnedConversations.contains("GRP_" + grp.id)) continue;
             if (!keyword.isEmpty() && !grp.name.toLowerCase().contains(keyword)) continue;
@@ -2125,21 +3247,23 @@ public class MainClient extends JFrame {
                 lblTargetStatus.setText(grp.members.size() + " thành viên • Nhóm chat riêng");
                 lblTargetStatus.setForeground(new Color(0, 150, 136));
 
+                // Bật toàn bộ tính năng cho Nhóm Chat
                 txtChat.setEnabled(true);
                 btnSend.setEnabled(true);
                 btnIcon.setEnabled(true);
-                btnCall.setEnabled(false);
-                btnVideoHeader.setEnabled(false);
-                btnRecord.setEnabled(false);
-                btnImg.setEnabled(false);
-                btnFile.setEnabled(false);
+                btnCall.setEnabled(true);
+                btnVideoHeader.setEnabled(true);
+                btnRecord.setEnabled(true);
+                btnImg.setEnabled(true);
+                btnFile.setEnabled(true);
                 btnGroupMembers.setVisible(true);
 
                 chatPanel.removeAll();
                 chatPanel.revalidate();
                 chatPanel.repaint();
-                resetSharedMediaState();
+                resetConversationViewState();
                 sendToServer("GETGROUPMSG;;;" + grp.id);
+                sendToServer("GETPINS;;;" + getCanonicalPinnedConvKey());
 
                 renderConversationList();
             }
@@ -2208,7 +3332,7 @@ public class MainClient extends JFrame {
                     chatPanel.removeAll();
                     chatPanel.revalidate();
                     chatPanel.repaint();
-                    resetSharedMediaState();
+                    resetConversationViewState();
                 }
                 lastDataSync = "";
                 sendToServer("GETDATA;;;" + currentUser);
@@ -2264,8 +3388,9 @@ public class MainClient extends JFrame {
                 chatPanel.removeAll();
                 chatPanel.revalidate();
                 chatPanel.repaint();
-                resetSharedMediaState();
+                resetConversationViewState();
                 sendToServer("GETMSG;;;" + currentUser + ";;;" + currentTargetUser);
+                sendToServer("GETPINS;;;" + getCanonicalPinnedConvKey());
 
                 renderConversationList();
             }
@@ -2288,9 +3413,12 @@ public class MainClient extends JFrame {
     }
 
     private void sendRawMessage(String messageContent) {
+        String msgId = generateMessageId();
+        String wireContent = "[MID:" + msgId + "]" + messageContent;
+
         if (isMulticastMode) {
             try {
-                String fullMsg = currentUser + ":::" + currentFullname + ":::" + messageContent;
+                String fullMsg = currentUser + ":::" + currentFullname + ":::" + wireContent;
                 byte[] data = fullMsg.getBytes("UTF-8");
                 if (mcSocket != null) mcSocket.send(new DatagramPacket(data, data.length, mcGroup, 9999));
             } catch (Exception e) {}
@@ -2298,7 +3426,7 @@ public class MainClient extends JFrame {
         else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
             try {
                 Group grp = groups.get(currentGroupId);
-                String payloadStr = currentGroupId + ":::" + currentUser + ":::" + currentFullname + ":::" + messageContent;
+                String payloadStr = currentGroupId + ":::" + currentUser + ":::" + currentFullname + ":::" + wireContent;
                 byte[] textBytes = payloadStr.getBytes("UTF-8");
                 byte[] packetData = new byte[textBytes.length + 1];
                 packetData[0] = 2;
@@ -2310,8 +3438,8 @@ public class MainClient extends JFrame {
                     }
                 }
 
-                sendToServer("SAVEGROUPMSG;;;" + currentGroupId + ";;;" + currentUser + ";;;" + messageContent);
-                appendMsg(currentUser, currentFullname, messageContent, true);
+                sendToServer("SAVEGROUPMSG;;;" + currentGroupId + ";;;" + currentUser + ";;;" + wireContent);
+                appendMsg(currentUser, currentFullname, wireContent, true);
             } catch (Exception e) {}
         }
         else {
@@ -2319,14 +3447,14 @@ public class MainClient extends JFrame {
             Friend f = friends.get(currentTargetUser);
             if (f != null && f.isOnline()) {
                 try {
-                    byte[] textBytes = messageContent.getBytes("UTF-8");
+                    byte[] textBytes = wireContent.getBytes("UTF-8");
                     byte[] packetData = new byte[textBytes.length + 1];
                     packetData[0] = 1;
                     System.arraycopy(textBytes, 0, packetData, 1, textBytes.length);
                     udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port));
 
-                    sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;" + messageContent);
-                    appendMsg(currentUser, currentFullname, messageContent, true);
+                    sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;" + wireContent);
+                    appendMsg(currentUser, currentFullname, wireContent, true);
                 } catch (Exception e) {}
             } else {
                 JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
@@ -2339,8 +3467,10 @@ public class MainClient extends JFrame {
         SwingUtilities.invokeLater(() -> vertical.setValue(vertical.getMaximum()));
     }
 
-    private void addChatBubble(JComponent comp, boolean isMe, String senderUsername, String senderName) {
-        JPanel w = new JPanel(new FlowLayout(isMe ? FlowLayout.RIGHT : FlowLayout.LEFT, 8, 2));
+    private ChatBubbleEntry addChatBubbleWithTracking(String msgId, JComponent comp, boolean isMe,
+                                                      String senderUsername, String senderName,
+                                                      String previewText, String copyableText, boolean isRecalled) {
+        JPanel w = new JPanel(new FlowLayout(isMe ? FlowLayout.RIGHT : FlowLayout.LEFT, 6, 2));
         w.setOpaque(false);
         w.setBorder(new EmptyBorder(3, 4, 3, 4));
 
@@ -2359,14 +3489,69 @@ public class MainClient extends JFrame {
             w.add(av);
         }
 
-        w.add(comp);
+        // Nút "..." ngay bên cạnh bong bóng chat để bấm mở menu Ghim / Thu hồi / Sao chép
+        FlatButton btnMore = new FlatButton("•••", new Color(255, 255, 255, 210), new Color(100, 110, 125), 999);
+        btnMore.setFont(new Font("SansSerif", Font.BOLD, 10));
+        btnMore.setPreferredSize(new Dimension(28, 24));
+        btnMore.setToolTipText("Ghim, sao chép hoặc thu hồi tin nhắn");
+        btnMore.setVisible(!isRecalled);
+        btnMore.addActionListener(e -> showBubbleActionMenu(btnMore, 0, btnMore.getHeight() + 2, msgId));
+
+        JPanel bubbleHolder = new JPanel(new BorderLayout());
+        bubbleHolder.setOpaque(false);
+        bubbleHolder.add(comp, BorderLayout.CENTER);
+
+        if (isMe) {
+            w.add(btnMore);
+            w.add(bubbleHolder);
+        } else {
+            w.add(bubbleHolder);
+            w.add(btnMore);
+        }
+
+        ChatBubbleEntry entry = new ChatBubbleEntry(
+                msgId, senderUsername, senderName, previewText, copyableText, isMe, isRecalled, w, bubbleHolder
+        );
+        entry.btnMore = btnMore;
+        messageBubbles.put(msgId, entry);
+        attachBubbleContextMenu(bubbleHolder, msgId);
+
         chatPanel.add(w);
         chatPanel.revalidate();
         chatPanel.repaint();
         scrollChatToBottom();
+        return entry;
     }
 
-    private void appendMsg(String senderUsername, String senderName, String msg, boolean isMe) {
+    private void appendMsg(String senderUsername, String senderName, String rawMsg, boolean isMe) {
+        String msgId;
+        String msg = rawMsg;
+
+        if (msg.startsWith("[MID:")) {
+            int closeIdx = msg.indexOf(']');
+            if (closeIdx != -1) {
+                msgId = msg.substring(5, closeIdx);
+                msg = msg.substring(closeIdx + 1);
+            } else {
+                msgId = "LEGACY_" + (++legacyCounter);
+            }
+        } else {
+            msgId = "LEGACY_" + (++legacyCounter);
+        }
+
+        if ("[RECALLED]".equals(msg)) {
+            BubblePanel recalledBubble = new BubblePanel(
+                    isMe ? new Color(238, 244, 255) : new Color(248, 249, 250),
+                    new Color(216, 222, 230)
+            );
+            JLabel lblRecalled = new JLabel("Tin nhắn đã được thu hồi");
+            lblRecalled.setFont(new Font("SansSerif", Font.ITALIC, 13));
+            lblRecalled.setForeground(new Color(130, 138, 150));
+            recalledBubble.add(lblRecalled, BorderLayout.CENTER);
+            addChatBubbleWithTracking(msgId, recalledBubble, isMe, senderUsername, senderName, "", "", true);
+            return;
+        }
+
         JPanel pnlContent = new JPanel();
         pnlContent.setLayout(new BoxLayout(pnlContent, BoxLayout.Y_AXIS));
         pnlContent.setOpaque(false);
@@ -2383,7 +3568,7 @@ public class MainClient extends JFrame {
         if (msg.startsWith("[STK:") && msg.endsWith("]")) {
             String stkId = msg.substring(5, msg.length() - 1);
             pnlContent.add(new StickerPanel(stkId, 102));
-            addChatBubble(pnlContent, isMe, senderUsername, senderName);
+            addChatBubbleWithTracking(msgId, pnlContent, isMe, senderUsername, senderName, "[Nhãn dán]", "", false);
             return;
         }
 
@@ -2399,7 +3584,7 @@ public class MainClient extends JFrame {
                 try { imgBytes = Base64.getDecoder().decode(fallbackB64); } catch (Exception ex) {}
             }
             if (imgBytes != null) {
-                appendImageMsg(senderUsername, senderName, imgBytes, isMe, ts);
+                appendImageMsg(msgId, senderUsername, senderName, imgBytes, isMe, ts);
             }
             return;
         }
@@ -2411,7 +3596,7 @@ public class MainClient extends JFrame {
             String localName = sep != -1 ? inner.substring(0, sep) : inner;
             String displayName = sep != -1 ? inner.substring(sep + 1) : localName;
             byte[] fileBytes = loadMediaFromLocal(localName);
-            renderHistoricalFileBubble(senderUsername, senderName, displayName, fileBytes, isMe);
+            renderHistoricalFileBubble(msgId, senderUsername, senderName, displayName, fileBytes, isMe);
             return;
         }
 
@@ -2448,16 +3633,16 @@ public class MainClient extends JFrame {
 
             pnlContent.add(txtArea);
             bubble.add(pnlContent, BorderLayout.CENTER);
-            addChatBubble(bubble, isMe, senderUsername, senderName);
+            addChatBubbleWithTracking(msgId, bubble, isMe, senderUsername, senderName, msg, msg, false);
         } else {
             JLabel l = new JLabel(msg);
             l.setFont(new Font("Segoe UI Emoji", Font.PLAIN, 38));
             pnlContent.add(l);
-            addChatBubble(pnlContent, isMe, senderUsername, senderName);
+            addChatBubbleWithTracking(msgId, pnlContent, isMe, senderUsername, senderName, msg, msg, false);
         }
     }
 
-    private void appendImageMsg(String senderUsername, String senderName, byte[] imgData, boolean isMe, long timestampMillis) {
+    private void appendImageMsg(String msgId, String senderUsername, String senderName, byte[] imgData, boolean isMe, long timestampMillis) {
         try {
             BufferedImage img = ImageIO.read(new ByteArrayInputStream(imgData));
             if (img == null) return;
@@ -2474,24 +3659,39 @@ public class MainClient extends JFrame {
             Image scaled = img.getScaledInstance(w, h, Image.SCALE_SMOOTH);
             JLabel l = new JLabel(new ImageIcon(scaled));
             l.setCursor(new Cursor(Cursor.HAND_CURSOR));
-            l.setToolTipText("Nhấn để phóng to ảnh");
+            l.setToolTipText("Nhấn để phóng to ảnh • Bấm nút ... bên cạnh để Ghim/Thu hồi");
             l.addMouseListener(new MouseAdapter() {
                 @Override
                 public void mouseClicked(MouseEvent e) {
-                    int idx = currentSharedImages.indexOf(mediaItem);
-                    showImagePreviewDialog(Math.max(0, idx));
+                    if (SwingUtilities.isLeftMouseButton(e)) {
+                        int idx = currentSharedImages.indexOf(mediaItem);
+                        showImagePreviewDialog(Math.max(0, idx));
+                    }
                 }
             });
+
+            JPanel wrapperContent = new JPanel();
+            wrapperContent.setLayout(new BoxLayout(wrapperContent, BoxLayout.Y_AXIS));
+            wrapperContent.setOpaque(false);
+            if ((isMulticastMode || currentGroupId != -1) && !isMe && senderName != null && !senderName.isEmpty()) {
+                JLabel lblName = new JLabel(senderName);
+                lblName.setFont(new Font("SansSerif", Font.BOLD, 11));
+                lblName.setForeground(new Color(110, 118, 130));
+                lblName.setBorder(new EmptyBorder(0, 0, 3, 0));
+                wrapperContent.add(lblName);
+            }
+            wrapperContent.add(l);
 
             BubblePanel bubble = isMe
                     ? new BubblePanel(ZALO_SENT_BUBBLE, ZALO_SENT_BORDER)
                     : new BubblePanel(Color.WHITE, new Color(222, 226, 232));
-            bubble.add(l, BorderLayout.CENTER);
-            addChatBubble(bubble, isMe, senderUsername, senderName);
+            bubble.add(wrapperContent, BorderLayout.CENTER);
+            ChatBubbleEntry entry = addChatBubbleWithTracking(msgId, bubble, isMe, senderUsername, senderName, "[Hình ảnh]", "", false);
+            entry.linkedMedia = mediaItem;
         } catch (Exception e) {}
     }
 
-    private void appendFileMsg(String senderUsername, String senderName, byte[] payload, boolean isMe) {
+    private void appendFileMsg(String msgId, String senderUsername, String senderName, byte[] payload, boolean isMe) {
         try {
             ByteBuffer bb = ByteBuffer.wrap(payload);
             int nameLen = bb.getInt();
@@ -2501,7 +3701,8 @@ public class MainClient extends JFrame {
             byte[] fileData = new byte[payload.length - 4 - nameLen];
             bb.get(fileData);
 
-            currentSharedFiles.add(0, new SharedFileItem(fileName, fileData));
+            SharedFileItem fileItem = new SharedFileItem(fileName, fileData);
+            currentSharedFiles.add(0, fileItem);
             refreshInfoDrawer();
 
             Color bg = isMe ? ZALO_SENT_BUBBLE : Color.WHITE;
@@ -2510,15 +3711,28 @@ public class MainClient extends JFrame {
             btn.setFont(new Font("SansSerif", Font.BOLD, 13));
             btn.addActionListener(e -> saveSharedFileToDisk(fileName, fileData));
 
+            JPanel wrapperContent = new JPanel();
+            wrapperContent.setLayout(new BoxLayout(wrapperContent, BoxLayout.Y_AXIS));
+            wrapperContent.setOpaque(false);
+            if ((isMulticastMode || currentGroupId != -1) && !isMe && senderName != null && !senderName.isEmpty()) {
+                JLabel lblName = new JLabel(senderName);
+                lblName.setFont(new Font("SansSerif", Font.BOLD, 11));
+                lblName.setForeground(new Color(110, 118, 130));
+                lblName.setBorder(new EmptyBorder(0, 0, 3, 0));
+                wrapperContent.add(lblName);
+            }
+            wrapperContent.add(btn);
+
             BubblePanel bubble = isMe
                     ? new BubblePanel(ZALO_SENT_BUBBLE, ZALO_SENT_BORDER)
                     : new BubblePanel(Color.WHITE, new Color(222, 226, 232));
-            bubble.add(btn, BorderLayout.CENTER);
-            addChatBubble(bubble, isMe, senderUsername, senderName);
+            bubble.add(wrapperContent, BorderLayout.CENTER);
+            ChatBubbleEntry entry = addChatBubbleWithTracking(msgId, bubble, isMe, senderUsername, senderName, "[Tệp] " + fileName, fileName, false);
+            entry.linkedFile = fileItem;
         } catch (Exception e) {}
     }
 
-    private void appendAudioMsg(String senderUsername, String senderName, byte[] audioData, boolean isMe) {
+    private void appendAudioMsg(String msgId, String senderUsername, String senderName, byte[] audioData, boolean isMe) {
         Color bg = isMe ? ZALO_SENT_BUBBLE : Color.WHITE;
         FlatButton btnPlay = new FlatButton("  Tin nhắn thoại", bg, ZALO_BLUE, 8);
         btnPlay.setIcon(new ZaloIcon(ZaloIcon.Type.MIC, 18, ZALO_BLUE));
@@ -2536,29 +3750,110 @@ public class MainClient extends JFrame {
                 } catch (Exception ex) {}
             }).start();
         });
+
+        JPanel wrapperContent = new JPanel();
+        wrapperContent.setLayout(new BoxLayout(wrapperContent, BoxLayout.Y_AXIS));
+        wrapperContent.setOpaque(false);
+        if ((isMulticastMode || currentGroupId != -1) && !isMe && senderName != null && !senderName.isEmpty()) {
+            JLabel lblName = new JLabel(senderName);
+            lblName.setFont(new Font("SansSerif", Font.BOLD, 11));
+            lblName.setForeground(new Color(110, 118, 130));
+            lblName.setBorder(new EmptyBorder(0, 0, 3, 0));
+            wrapperContent.add(lblName);
+        }
+        wrapperContent.add(btnPlay);
+
         BubblePanel bubble = isMe
                 ? new BubblePanel(ZALO_SENT_BUBBLE, ZALO_SENT_BORDER)
                 : new BubblePanel(Color.WHITE, new Color(222, 226, 232));
-        bubble.add(btnPlay, BorderLayout.CENTER);
-        addChatBubble(bubble, isMe, senderUsername, senderName);
+        bubble.add(wrapperContent, BorderLayout.CENTER);
+        addChatBubbleWithTracking(msgId, bubble, isMe, senderUsername, senderName, "[Tin nhắn thoại]", "", false);
     }
 
     private boolean autoStartVideoOnCall = false;
 
+    // =========================================================================
+    // HỆ THỐNG GỌI THOẠI & GỌI VIDEO CHO CẢ 1-1, NHÓM CHAT VÀ PHÒNG LAN
+    // =========================================================================
     private void initiateCall(boolean withVideo) {
-        if (isMulticastMode || currentGroupId != -1) {
-            JOptionPane.showMessageDialog(this, "Chỉ hỗ trợ gọi thoại/video trực tiếp 1-1!");
+        if (isMulticastMode) {
+            autoStartVideoOnCall = withVideo;
+            isGroupConferenceCall = true;
+            currentCallUser = "LAN_ROOM";
+
+            try {
+                byte[] dt = ("CALL_MC:::" + currentUser + ":::" + currentFullname).getBytes("UTF-8");
+                if (mcSocket != null) mcSocket.send(new DatagramPacket(dt, dt.length, mcGroup, 9999));
+            } catch (Exception e) {}
+
+            pnlTargetVideo.setAvatarText("LAN");
+            pnlTargetVideo.setFrame(null);
+            lblCallName.setText("Phòng Họp LAN Chung");
+            lblCallStatus.setText("Đang kết nối âm thanh & video mạng LAN...");
+            btnAcceptCall.setVisible(false);
+            btnDeclineCall.setVisible(false);
+            btnEndCall.setVisible(true);
+            btnToggleVideo.setVisible(true);
+            cardLayout.show(rightPanel, "CALL");
+
+            startAudioStreams();
+            if (withVideo && !isVideoOn) toggleVideo();
             return;
         }
+
+        if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+            Group g = groups.get(currentGroupId);
+            autoStartVideoOnCall = withVideo;
+            isGroupConferenceCall = true;
+            currentCallUser = "GROUP_" + currentGroupId;
+
+            try {
+                String payload = currentGroupId + ":::" + currentUser + ":::" + currentFullname;
+                byte[] b = payload.getBytes("UTF-8");
+                byte[] pkt = new byte[b.length + 1];
+                pkt[0] = 18;
+                System.arraycopy(b, 0, pkt, 1, b.length);
+                for (Friend m : g.members) {
+                    if (!m.username.equals(currentUser) && m.isOnline()) {
+                        udpSocket.send(new DatagramPacket(pkt, pkt.length, InetAddress.getByName(m.ip), m.port));
+                    }
+                }
+            } catch (Exception e) {}
+
+            pnlTargetVideo.setAvatarText(g.name.substring(0, 1).toUpperCase());
+            pnlTargetVideo.setFrame(null);
+            lblCallName.setText(g.name);
+            lblCallStatus.setText("Cuộc gọi nhóm đang diễn ra...");
+            btnAcceptCall.setVisible(false);
+            btnDeclineCall.setVisible(false);
+            btnEndCall.setVisible(true);
+            btnToggleVideo.setVisible(true);
+            cardLayout.show(rightPanel, "CALL");
+
+            startAudioStreams();
+            if (withVideo && !isVideoOn) toggleVideo();
+            return;
+        }
+
         if (currentTargetUser == null) return;
         Friend f = friends.get(currentTargetUser);
         if (f == null || !f.isOnline()) {
             JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
             return;
         }
+        isGroupConferenceCall = false;
         autoStartVideoOnCall = withVideo;
         currentCallUser = currentTargetUser;
-        sendP2P(f, new byte[]{4});
+
+        try {
+            byte[] uBytes = currentUser.getBytes("UTF-8");
+            byte[] pkt = new byte[uBytes.length + 1];
+            pkt[0] = 4;
+            System.arraycopy(uBytes, 0, pkt, 1, uBytes.length);
+            sendP2P(f, pkt);
+        } catch (Exception e) {
+            sendP2P(f, new byte[]{4});
+        }
 
         pnlTargetVideo.setAvatarText(f.name.substring(0, 1).toUpperCase());
         pnlTargetVideo.setFrame(null);
@@ -2572,14 +3867,58 @@ public class MainClient extends JFrame {
         cardLayout.show(rightPanel, "CALL");
     }
 
-    private void handleIncomingCall(String callerUsername) {
+    private void handleIncomingGroupCall(int gId, String callerUser, String callerName) {
+        if (currentCallUser != null) return;
+        Group g = groups.get(gId);
+        if (g == null) return;
+
+        isGroupConferenceCall = true;
+        autoStartVideoOnCall = false;
+        currentGroupId = gId;
+        currentCallUser = "GROUP_" + gId;
+
+        pnlTargetVideo.setAvatarText(g.name.substring(0, 1).toUpperCase());
+        pnlTargetVideo.setFrame(null);
+        lblCallName.setText(g.name);
+        lblCallStatus.setText(callerName + " đang gọi nhóm...");
+        btnAcceptCall.setVisible(true);
+        btnDeclineCall.setVisible(true);
+        btnEndCall.setVisible(false);
+        btnToggleVideo.setVisible(false);
+
+        Toolkit.getDefaultToolkit().beep();
+        cardLayout.show(rightPanel, "CALL");
+    }
+
+    private void handleIncomingMulticastCall(String callerName) {
+        if (currentCallUser != null) return;
+        isGroupConferenceCall = true;
+        autoStartVideoOnCall = false;
+        currentCallUser = "LAN_ROOM";
+
+        pnlTargetVideo.setAvatarText("LAN");
+        pnlTargetVideo.setFrame(null);
+        lblCallName.setText("Phòng Họp LAN Chung");
+        lblCallStatus.setText(callerName + " đang gọi trong mạng LAN...");
+        btnAcceptCall.setVisible(true);
+        btnDeclineCall.setVisible(true);
+        btnEndCall.setVisible(false);
+        btnToggleVideo.setVisible(false);
+
+        Toolkit.getDefaultToolkit().beep();
+        cardLayout.show(rightPanel, "CALL");
+    }
+
+    private void handleIncomingCall(String callerUsername, String fallbackIp, int fallbackPort) {
         if (currentCallUser != null) {
-            sendP2P(friends.get(callerUsername), new byte[]{6});
+            Friend busyF = findUserInFriendsOrGroups(callerUsername, fallbackIp, fallbackPort);
+            sendP2P(busyF, new byte[]{6});
             return;
         }
+        isGroupConferenceCall = false;
         autoStartVideoOnCall = false;
         currentCallUser = callerUsername;
-        Friend f = friends.get(currentCallUser);
+        Friend f = findUserInFriendsOrGroups(callerUsername, fallbackIp, fallbackPort);
         if (f == null) return;
 
         pnlTargetVideo.setAvatarText(f.name.substring(0, 1).toUpperCase());
@@ -2597,8 +3936,10 @@ public class MainClient extends JFrame {
 
     private void acceptCall() {
         if (currentCallUser == null) return;
-        sendP2P(friends.get(currentCallUser), new byte[]{5});
-        lblCallStatus.setText("Đang trò chuyện");
+        if (!isGroupConferenceCall) {
+            sendP2P(friends.get(currentCallUser), new byte[]{5});
+        }
+        lblCallStatus.setText(isGroupConferenceCall ? "Đang tham gia cuộc gọi nhóm" : "Đang trò chuyện");
         btnAcceptCall.setVisible(false);
         btnDeclineCall.setVisible(false);
         btnEndCall.setVisible(true);
@@ -2617,7 +3958,9 @@ public class MainClient extends JFrame {
 
     private void declineCall() {
         if (currentCallUser == null) return;
-        sendP2P(friends.get(currentCallUser), new byte[]{6});
+        if (!isGroupConferenceCall) {
+            sendP2P(friends.get(currentCallUser), new byte[]{6});
+        }
         closeCallUI();
     }
 
@@ -2628,7 +3971,9 @@ public class MainClient extends JFrame {
 
     private void endCall() {
         if (currentCallUser == null) return;
-        sendP2P(friends.get(currentCallUser), new byte[]{7});
+        if (!isGroupConferenceCall) {
+            sendP2P(friends.get(currentCallUser), new byte[]{7});
+        }
         closeCallUI();
     }
 
@@ -2636,12 +3981,40 @@ public class MainClient extends JFrame {
 
     private void closeCallUI() {
         currentCallUser = null;
+        isGroupConferenceCall = false;
         autoStartVideoOnCall = false;
         stopAudioStreams();
         stopVideo();
+        btnToggleVideo.setText(" Bật Cam");
+        btnToggleVideo.setBackground(ZALO_BLUE);
         btnToggleVideo.setVisible(false);
         pnlTargetVideo.setFrame(null);
         cardLayout.show(rightPanel, "CHAT");
+    }
+
+    private void sendCallPacketToActiveTargets(byte[] packetData) {
+        try {
+            if ("LAN_ROOM".equals(currentCallUser)) {
+                if (mcSocket != null && mcGroup != null) {
+                    mcSocket.send(new DatagramPacket(packetData, packetData.length, mcGroup, 9999));
+                }
+            } else if (currentCallUser != null && currentCallUser.startsWith("GROUP_")) {
+                int gId = Integer.parseInt(currentCallUser.substring(6));
+                Group g = groups.get(gId);
+                if (g != null) {
+                    for (Friend m : g.members) {
+                        if (!m.username.equals(currentUser) && m.isOnline()) {
+                            udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(m.ip), m.port));
+                        }
+                    }
+                }
+            } else if (currentCallUser != null) {
+                Friend f = friends.get(currentCallUser);
+                if (f != null && f.isOnline()) {
+                    udpSocket.send(new DatagramPacket(packetData, packetData.length, InetAddress.getByName(f.ip), f.port));
+                }
+            }
+        } catch (Exception e) {}
     }
 
     private void startAudioStreams() {
@@ -2657,15 +4030,11 @@ public class MainClient extends JFrame {
                     byte[] audioBuffer = new byte[1024];
                     byte[] packetData = new byte[1025];
                     packetData[0] = 0;
-                    Friend f = friends.get(currentCallUser);
-                    if (f == null) return;
-                    InetAddress addr = InetAddress.getByName(f.ip);
-                    int targetPort = f.port;
                     while (isCalling && currentCallUser != null) {
                         int read = mic.read(audioBuffer, 0, audioBuffer.length);
                         if (read > 0) {
                             System.arraycopy(audioBuffer, 0, packetData, 1, read);
-                            udpSocket.send(new DatagramPacket(packetData, packetData.length, addr, targetPort));
+                            sendCallPacketToActiveTargets(packetData);
                         }
                     }
                 } catch (Exception e) {}
@@ -2678,6 +4047,9 @@ public class MainClient extends JFrame {
         if (mic != null) { mic.close(); mic = null; }
     }
 
+    // =========================================================================
+    // TRUYỀN FILE / ẢNH / VOICE PHÂN MẢNH CHO CẢ 1-1, NHÓM VÀ MULTICAST LAN
+    // =========================================================================
     private void sendFragmentedData(Friend f, byte type, byte[] fullData, long msgId) {
         new Thread(() -> {
             try {
@@ -2699,16 +4071,82 @@ public class MainClient extends JFrame {
         }).start();
     }
 
+    private void sendFragmentedGroupData(Group grp, byte type, byte[] fullData, long msgId) {
+        new Thread(() -> {
+            try {
+                byte[] uBytes = currentUser.getBytes("UTF-8");
+                byte[] nBytes = currentFullname.getBytes("UTF-8");
+                int headerSize = 1 + 4 + 8 + 4 + 4 + 4 + uBytes.length + 4 + nBytes.length;
+                int maxChunk = 50000 - headerSize;
+                int offset = 0;
+                while (offset < fullData.length) {
+                    int length = Math.min(maxChunk, fullData.length - offset);
+                    ByteBuffer bb = ByteBuffer.allocate(headerSize + length);
+                    bb.put(type);
+                    bb.putInt(grp.id);
+                    bb.putLong(msgId);
+                    bb.putInt(fullData.length);
+                    bb.putInt(offset);
+                    bb.putInt(uBytes.length);
+                    bb.put(uBytes);
+                    bb.putInt(nBytes.length);
+                    bb.put(nBytes);
+                    bb.put(fullData, offset, length);
+                    byte[] pkt = bb.array();
+
+                    for (Friend m : grp.members) {
+                        if (!m.username.equals(currentUser) && m.isOnline()) {
+                            udpSocket.send(new DatagramPacket(pkt, pkt.length, InetAddress.getByName(m.ip), m.port));
+                        }
+                    }
+                    offset += length;
+                    Thread.sleep(15);
+                }
+            } catch (Exception e) {}
+        }).start();
+    }
+
+    private void sendFragmentedMulticastData(byte type, byte[] fullData, long msgId) {
+        new Thread(() -> {
+            try {
+                if (mcSocket == null || mcGroup == null) return;
+                byte[] uBytes = currentUser.getBytes("UTF-8");
+                byte[] nBytes = currentFullname.getBytes("UTF-8");
+                int headerSize = 1 + 8 + 4 + 4 + 4 + uBytes.length + 4 + nBytes.length;
+                int maxChunk = 48000 - headerSize;
+                int offset = 0;
+                while (offset < fullData.length) {
+                    int length = Math.min(maxChunk, fullData.length - offset);
+                    ByteBuffer bb = ByteBuffer.allocate(headerSize + length);
+                    bb.put(type);
+                    bb.putLong(msgId);
+                    bb.putInt(fullData.length);
+                    bb.putInt(offset);
+                    bb.putInt(uBytes.length);
+                    bb.put(uBytes);
+                    bb.putInt(nBytes.length);
+                    bb.put(nBytes);
+                    bb.put(fullData, offset, length);
+                    byte[] pkt = bb.array();
+
+                    mcSocket.send(new DatagramPacket(pkt, pkt.length, mcGroup, 9999));
+                    offset += length;
+                    Thread.sleep(15);
+                }
+            } catch (Exception e) {}
+        }).start();
+    }
+
     private void sendFileOrImage(int type) {
-        if (isMulticastMode || currentGroupId != -1) {
-            JOptionPane.showMessageDialog(this, "Tính năng gửi File/Ảnh hiện hỗ trợ trong chat 1-1!");
-            return;
-        }
-        if (currentTargetUser == null) return;
-        Friend f = friends.get(currentTargetUser);
-        if (f == null || !f.isOnline()) {
-            JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
-            return;
+        if (!isMulticastMode && currentGroupId == -1 && currentTargetUser == null) return;
+
+        Friend targetFriend = null;
+        if (!isMulticastMode && currentGroupId == -1) {
+            targetFriend = friends.get(currentTargetUser);
+            if (targetFriend == null || !targetFriend.isOnline()) {
+                JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
+                return;
+            }
         }
 
         JFileChooser fc = new JFileChooser();
@@ -2717,15 +4155,27 @@ public class MainClient extends JFrame {
             try {
                 byte[] fileBytes = Files.readAllBytes(file.toPath());
                 long msgId = System.currentTimeMillis();
+                String msgIdStr = String.valueOf(msgId);
 
                 if (type == 8) {
                     String localName = "img_" + msgId + ".dat";
                     saveMediaToLocal(localName, fileBytes);
-                    sendFragmentedData(f, (byte) 8, fileBytes, msgId);
-
                     String thumbB64 = createCompressedImageBase64(fileBytes);
-                    sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;[MEDIA_IMG:" + localName + ":]");
-                    appendImageMsg(currentUser, currentFullname, fileBytes, true, msgId);
+                    String wireImg = "[MID:" + msgIdStr + "][MEDIA_IMG:" + localName + ":" + thumbB64 + "]";
+
+                    if (isMulticastMode) {
+                        sendFragmentedMulticastData((byte) 16, fileBytes, msgId);
+                        appendImageMsg(msgIdStr, currentUser, currentFullname, fileBytes, true, msgId);
+                    } else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+                        Group grp = groups.get(currentGroupId);
+                        sendFragmentedGroupData(grp, (byte) 16, fileBytes, msgId);
+                        sendToServer("SAVEGROUPMSG;;;" + currentGroupId + ";;;" + currentUser + ";;;" + wireImg);
+                        appendImageMsg(msgIdStr, currentUser, currentFullname, fileBytes, true, msgId);
+                    } else if (targetFriend != null) {
+                        sendFragmentedData(targetFriend, (byte) 8, fileBytes, msgId);
+                        sendToServer("SAVEMSG;;;" + currentUser + ";;;" + targetFriend.username + ";;;" + wireImg);
+                        appendImageMsg(msgIdStr, currentUser, currentFullname, fileBytes, true, msgId);
+                    }
                 } else {
                     String safeName = file.getName().replace(":", "_").replace("|", "_").replace(";", "_");
                     String localName = "file_" + msgId + "_" + safeName;
@@ -2736,10 +4186,22 @@ public class MainClient extends JFrame {
                     bb.putInt(nameBytes.length);
                     bb.put(nameBytes);
                     bb.put(fileBytes);
+                    byte[] payload = bb.array();
+                    String wireFile = "[MID:" + msgIdStr + "][MEDIA_FILE:" + localName + ":" + safeName + "]";
 
-                    sendFragmentedData(f, (byte) 9, bb.array(), msgId);
-                    sendToServer("SAVEMSG;;;" + currentUser + ";;;" + f.username + ";;;[MEDIA_FILE:" + localName + ":" + safeName + "]");
-                    appendFileMsg(currentUser, currentFullname, bb.array(), true);
+                    if (isMulticastMode) {
+                        sendFragmentedMulticastData((byte) 17, payload, msgId);
+                        appendFileMsg(msgIdStr, currentUser, currentFullname, payload, true);
+                    } else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+                        Group grp = groups.get(currentGroupId);
+                        sendFragmentedGroupData(grp, (byte) 17, payload, msgId);
+                        sendToServer("SAVEGROUPMSG;;;" + currentGroupId + ";;;" + currentUser + ";;;" + wireFile);
+                        appendFileMsg(msgIdStr, currentUser, currentFullname, payload, true);
+                    } else if (targetFriend != null) {
+                        sendFragmentedData(targetFriend, (byte) 9, payload, msgId);
+                        sendToServer("SAVEMSG;;;" + currentUser + ";;;" + targetFriend.username + ";;;" + wireFile);
+                        appendFileMsg(msgIdStr, currentUser, currentFullname, payload, true);
+                    }
                 }
             } catch (Exception ex) {
                 JOptionPane.showMessageDialog(this, "Lỗi đọc file");
@@ -2748,15 +4210,15 @@ public class MainClient extends JFrame {
     }
 
     private void toggleRecord() {
-        if (isMulticastMode || currentGroupId != -1) {
-            JOptionPane.showMessageDialog(this, "Tính năng ghi âm hiện hỗ trợ trong chat 1-1!");
-            return;
-        }
-        if (currentTargetUser == null) return;
-        Friend f = friends.get(currentTargetUser);
-        if (f == null || !f.isOnline()) {
-            JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
-            return;
+        if (!isMulticastMode && currentGroupId == -1 && currentTargetUser == null) return;
+
+        Friend targetFriend = null;
+        if (!isMulticastMode && currentGroupId == -1) {
+            targetFriend = friends.get(currentTargetUser);
+            if (targetFriend == null || !targetFriend.isOnline()) {
+                JOptionPane.showMessageDialog(this, "Người này đang ngoại tuyến!");
+                return;
+            }
         }
 
         if (!isRecording) {
@@ -2781,8 +4243,16 @@ public class MainClient extends JFrame {
             isRecording = false;
             btnRecord.setIcon(new ZaloIcon(ZaloIcon.Type.MIC, 20, ZALO_ICON_GRAY));
             byte[] audioData = currentRecordStream.toByteArray();
-            appendAudioMsg(currentUser, currentFullname, audioData, true);
-            sendFragmentedData(f, (byte) 3, audioData, System.currentTimeMillis());
+            long audioMsgId = System.currentTimeMillis();
+            appendAudioMsg(String.valueOf(audioMsgId), currentUser, currentFullname, audioData, true);
+
+            if (isMulticastMode) {
+                sendFragmentedMulticastData((byte) 15, audioData, audioMsgId);
+            } else if (currentGroupId != -1 && groups.containsKey(currentGroupId)) {
+                sendFragmentedGroupData(groups.get(currentGroupId), (byte) 15, audioData, audioMsgId);
+            } else if (targetFriend != null) {
+                sendFragmentedData(targetFriend, (byte) 3, audioData, audioMsgId);
+            }
         }
     }
 
@@ -2830,11 +4300,6 @@ public class MainClient extends JFrame {
         lblMyVideo.setVisible(true);
         new Thread(() -> {
             try {
-                Friend f = friends.get(currentCallUser);
-                if (f == null) return;
-                InetAddress addr = InetAddress.getByName(f.ip);
-                int targetPort = f.port;
-
                 while (isVideoOn && currentCallUser != null && webcam.isOpen()) {
                     BufferedImage image = webcam.getImage();
                     if (image != null) {
@@ -2851,7 +4316,7 @@ public class MainClient extends JFrame {
                             byte[] packetData = new byte[imgBytes.length + 1];
                             packetData[0] = 10;
                             System.arraycopy(imgBytes, 0, packetData, 1, imgBytes.length);
-                            udpSocket.send(new DatagramPacket(packetData, packetData.length, addr, targetPort));
+                            sendCallPacketToActiveTargets(packetData);
                         }
                     }
                     Thread.sleep(60);
@@ -2911,20 +4376,21 @@ public class MainClient extends JFrame {
         lblTargetStatus.setText("Tất cả thành viên trong mạng LAN đều có mặt");
         lblTargetStatus.setForeground(new Color(25, 135, 84));
 
+        // Bật đầy đủ tính năng cho Phòng Chat LAN Chung
         txtChat.setEnabled(true);
         btnSend.setEnabled(true);
         btnIcon.setEnabled(true);
-        btnCall.setEnabled(false);
-        btnVideoHeader.setEnabled(false);
-        btnRecord.setEnabled(false);
-        btnImg.setEnabled(false);
-        btnFile.setEnabled(false);
+        btnCall.setEnabled(true);
+        btnVideoHeader.setEnabled(true);
+        btnRecord.setEnabled(true);
+        btnImg.setEnabled(true);
+        btnFile.setEnabled(true);
         btnGroupMembers.setVisible(false);
 
         chatPanel.removeAll();
         chatPanel.revalidate();
         chatPanel.repaint();
-        resetSharedMediaState();
+        resetConversationViewState();
         appendMsg(null, "", "Chào mừng bạn đến với phòng chat LAN chung!", false);
 
         try {
@@ -2934,19 +4400,100 @@ public class MainClient extends JFrame {
 
             new Thread(() -> {
                 try {
-                    byte[] buf = new byte[2048];
+                    byte[] buf = new byte[65507];
                     while (isMulticastMode && isRunning) {
                         DatagramPacket p = new DatagramPacket(buf, buf.length);
                         mcSocket.receive(p);
-                        String rcv = new String(p.getData(), 0, p.getLength(), "UTF-8");
+                        int len = p.getLength();
+                        if (len <= 0) continue;
 
-                        String[] parts = rcv.split(":::");
-                        if (parts.length == 3) {
-                            String senderUser = parts[0];
-                            String senderName = parts[1];
-                            String content = parts[2];
-                            boolean isMe = senderUser.equals(currentUser);
-                            SwingUtilities.invokeLater(() -> appendMsg(senderUser, senderName, content, isMe));
+                        int firstByte = buf[0];
+                        if (firstByte == 0 && isCalling && "LAN_ROOM".equals(currentCallUser) && speaker != null) {
+                            speaker.write(buf, 1, len - 1);
+                            continue;
+                        }
+                        if (firstByte == 10 && isCalling && "LAN_ROOM".equals(currentCallUser)) {
+                            byte[] imgBytes = new byte[len - 1];
+                            System.arraycopy(buf, 1, imgBytes, 0, imgBytes.length);
+                            SwingUtilities.invokeLater(() -> {
+                                try {
+                                    BufferedImage img = ImageIO.read(new ByteArrayInputStream(imgBytes));
+                                    pnlTargetVideo.setFrame(img);
+                                } catch (Exception e) {}
+                            });
+                            continue;
+                        }
+                        if (firstByte == 15 || firstByte == 16 || firstByte == 17) {
+                            ByteBuffer bb = ByteBuffer.wrap(buf, 1, len - 1);
+                            long id = bb.getLong();
+                            int total = bb.getInt();
+                            int offset = bb.getInt();
+                            int userLen = bb.getInt();
+                            byte[] uBytes = new byte[userLen];
+                            bb.get(uBytes);
+                            String sUser = new String(uBytes, "UTF-8");
+
+                            int nameLen = bb.getInt();
+                            byte[] nBytes = new byte[nameLen];
+                            bb.get(nBytes);
+                            String sName = new String(nBytes, "UTF-8");
+
+                            int headerSize = 1 + 8 + 4 + 4 + 4 + userLen + 4 + nameLen;
+                            int dataLen = len - headerSize;
+                            if (dataLen > 0) {
+                                if (!incomingData.containsKey(id)) {
+                                    incomingData.put(id, new byte[total]);
+                                    incomingDataReceived.put(id, 0);
+                                }
+                                byte[] fullData = incomingData.get(id);
+                                System.arraycopy(buf, headerSize, fullData, offset, dataLen);
+                                int received = incomingDataReceived.get(id) + dataLen;
+                                incomingDataReceived.put(id, received);
+
+                                if (received >= total) {
+                                    byte[] finalData = fullData.clone();
+                                    String mediaMsgId = String.valueOf(id);
+                                    SwingUtilities.invokeLater(() -> {
+                                        if (isMulticastMode && !sUser.equals(currentUser)) {
+                                            if (firstByte == 15) appendAudioMsg(mediaMsgId, sUser, sName, finalData, false);
+                                            else if (firstByte == 16) appendImageMsg(mediaMsgId, sUser, sName, finalData, false, id);
+                                            else if (firstByte == 17) appendFileMsg(mediaMsgId, sUser, sName, finalData, false);
+                                        }
+                                    });
+                                    incomingData.remove(id);
+                                    incomingDataReceived.remove(id);
+                                }
+                            }
+                            continue;
+                        }
+
+                        String rcv = new String(p.getData(), 0, len, "UTF-8");
+
+                        if (rcv.startsWith("CALL_MC:::")) {
+                            String[] cParts = rcv.split(":::", 3);
+                            if (cParts.length == 3 && !cParts[1].equals(currentUser)) {
+                                SwingUtilities.invokeLater(() -> handleIncomingMulticastCall(cParts[2]));
+                            }
+                        } else if (rcv.startsWith("RECALL_MC:::")) {
+                            String targetId = rcv.substring(12);
+                            SwingUtilities.invokeLater(() -> applyRecallLocally(targetId));
+                        } else if (rcv.startsWith("PIN_MC:::")) {
+                            String[] pParts = rcv.split(":::", 4);
+                            if (pParts.length == 4) {
+                                SwingUtilities.invokeLater(() -> applyPinLocally(pParts[1], pParts[2], pParts[3]));
+                            }
+                        } else if (rcv.startsWith("UNPIN_MC:::")) {
+                            String targetId = rcv.substring(11);
+                            SwingUtilities.invokeLater(() -> applyUnpinLocally(targetId));
+                        } else {
+                            String[] parts = rcv.split(":::", 3);
+                            if (parts.length == 3) {
+                                String senderUser = parts[0];
+                                String senderName = parts[1];
+                                String content = parts[2];
+                                boolean isMe = senderUser.equals(currentUser);
+                                SwingUtilities.invokeLater(() -> appendMsg(senderUser, senderName, content, isMe));
+                            }
                         }
                     }
                 } catch (Exception e) {}
@@ -2992,7 +4539,6 @@ public class MainClient extends JFrame {
         try {
             BufferedImage src = ImageIO.read(new ByteArrayInputStream(rawImgBytes));
             if (src == null) return "";
-            // Thu nhỏ thumbnail dự phòng xuống 96px để không bao giờ tràn gói tin UDP 64KB khi tải lịch sử
             int w = src.getWidth(), h = src.getHeight(), maxDim = 96;
             if (w > maxDim || h > maxDim) {
                 float r = Math.min((float) maxDim / w, (float) maxDim / h);
@@ -3028,8 +4574,9 @@ public class MainClient extends JFrame {
         }
     }
 
-    private void renderHistoricalFileBubble(String senderUsername, String senderName, String fileName, byte[] fileData, boolean isMe) {
-        currentSharedFiles.add(0, new SharedFileItem(fileName, fileData));
+    private void renderHistoricalFileBubble(String msgId, String senderUsername, String senderName, String fileName, byte[] fileData, boolean isMe) {
+        SharedFileItem fileItem = new SharedFileItem(fileName, fileData);
+        currentSharedFiles.add(0, fileItem);
         refreshInfoDrawer();
 
         Color bg = isMe ? ZALO_SENT_BUBBLE : Color.WHITE;
@@ -3038,11 +4585,24 @@ public class MainClient extends JFrame {
         btn.setFont(new Font("SansSerif", Font.BOLD, 13));
         btn.addActionListener(e -> saveSharedFileToDisk(fileName, fileData));
 
+        JPanel wrapperContent = new JPanel();
+        wrapperContent.setLayout(new BoxLayout(wrapperContent, BoxLayout.Y_AXIS));
+        wrapperContent.setOpaque(false);
+        if ((isMulticastMode || currentGroupId != -1) && !isMe && senderName != null && !senderName.isEmpty()) {
+            JLabel lblName = new JLabel(senderName);
+            lblName.setFont(new Font("SansSerif", Font.BOLD, 11));
+            lblName.setForeground(new Color(110, 118, 130));
+            lblName.setBorder(new EmptyBorder(0, 0, 3, 0));
+            wrapperContent.add(lblName);
+        }
+        wrapperContent.add(btn);
+
         BubblePanel bubble = isMe
                 ? new BubblePanel(ZALO_SENT_BUBBLE, ZALO_SENT_BORDER)
                 : new BubblePanel(Color.WHITE, new Color(222, 226, 232));
-        bubble.add(btn, BorderLayout.CENTER);
-        addChatBubble(bubble, isMe, senderUsername, senderName);
+        bubble.add(wrapperContent, BorderLayout.CENTER);
+        ChatBubbleEntry entry = addChatBubbleWithTracking(msgId, bubble, isMe, senderUsername, senderName, "[Tệp] " + fileName, fileName, false);
+        entry.linkedFile = fileItem;
     }
 
     private void saveSharedFileToDisk(String fileName, byte[] fileData) {

@@ -7,12 +7,18 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.net.*;
 import java.sql.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class UDPServer extends JFrame {
 
     private DefaultTableModel tableModel;
     private JTable table;
     private JLabel lblStatus;
+
+    // Lưu thời điểm hoạt động gần nhất của từng user (ms)
+    private static final ConcurrentHashMap<String, Long> lastSeenMap = new ConcurrentHashMap<>();
+    // Quá 20 giây không nhận tín hiệu từ Client sẽ tự động chuyển sang Offline
+    private static final long ONLINE_TIMEOUT_MS = 20_000L;
 
     public UDPServer() {
         setTitle("Z-Voice P2P - MÁY CHỦ TRUNG TÂM");
@@ -36,6 +42,9 @@ public class UDPServer extends JFrame {
 
         JScrollPane scrollPane = new JScrollPane(table);
         add(scrollPane, BorderLayout.CENTER);
+
+        // Xóa trạng thái online cũ còn tồn đọng trong DB khi vừa bật Server
+        resetAllUsersOffline();
 
         Timer timer = new Timer(3000, e -> refreshOnlineUsers());
         timer.start();
@@ -63,29 +72,76 @@ public class UDPServer extends JFrame {
                 socket.send(packet);
                 txtBroadcast.setText("");
                 JOptionPane.showMessageDialog(this, "Đã phát Broadcast tới tất cả Client trong mạng!");
-            } catch (Exception ex) { ex.printStackTrace(); }
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
         });
 
         new Thread(this::startUDPServer).start();
     }
 
-    private void refreshOnlineUsers() {
+    private static void resetAllUsersOffline() {
+        lastSeenMap.clear();
         try (Connection c = getConn();
-             PreparedStatement s = c.prepareStatement("SELECT username, fullname, ip, port FROM users WHERE port > 0 AND ip IS NOT NULL")) {
-            ResultSet rs = s.executeQuery();
-            tableModel.setRowCount(0);
-            int count = 0;
-            while (rs.next()) {
-                tableModel.addRow(new Object[]{
-                        rs.getString("username"),
-                        rs.getString("fullname"),
-                        rs.getString("ip"),
-                        rs.getInt("port")
-                });
-                count++;
+             PreparedStatement s = c.prepareStatement("UPDATE users SET ip = NULL, port = 0")) {
+            s.executeUpdate();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void markUserActive(String username) {
+        if (username != null && !username.trim().isEmpty()) {
+            lastSeenMap.put(username.trim(), System.currentTimeMillis());
+        }
+    }
+
+    private static boolean isUserOnline(String username) {
+        if (username == null) return false;
+        Long lastSeen = lastSeenMap.get(username);
+        return lastSeen != null && (System.currentTimeMillis() - lastSeen) <= ONLINE_TIMEOUT_MS;
+    }
+
+    private static void cleanupTimedOutUsers(Connection c) {
+        long now = System.currentTimeMillis();
+        for (String expiredUser : lastSeenMap.keySet()) {
+            Long lastSeen = lastSeenMap.get(expiredUser);
+            if (lastSeen != null && (now - lastSeen) > ONLINE_TIMEOUT_MS) {
+                lastSeenMap.remove(expiredUser);
+                try (PreparedStatement ps = c.prepareStatement("UPDATE users SET ip = NULL, port = 0 WHERE username = ?")) {
+                    ps.setString(1, expiredUser);
+                    ps.executeUpdate();
+                } catch (Exception ignored) {
+                }
             }
-            lblStatus.setText("Server P2P hoạt động ở cổng 8080 | Số người đang Online: " + count);
-            lblStatus.setForeground(new Color(0, 104, 255));
+        }
+    }
+
+    private void refreshOnlineUsers() {
+        try (Connection c = getConn()) {
+            cleanupTimedOutUsers(c);
+
+            try (PreparedStatement s = c.prepareStatement("SELECT username, fullname, ip, port FROM users WHERE port > 0 AND ip IS NOT NULL")) {
+                ResultSet rs = s.executeQuery();
+                tableModel.setRowCount(0);
+                int count = 0;
+                while (rs.next()) {
+                    String uname = rs.getString("username");
+                    if (!isUserOnline(uname)) {
+                        setOffline(uname);
+                        continue;
+                    }
+                    tableModel.addRow(new Object[]{
+                            uname,
+                            rs.getString("fullname"),
+                            rs.getString("ip"),
+                            rs.getInt("port")
+                    });
+                    count++;
+                }
+                lblStatus.setText("Server P2P hoạt động ở cổng 8080 | Số người đang Online: " + count);
+                lblStatus.setForeground(new Color(0, 104, 255));
+            }
         } catch (Exception e) {
             lblStatus.setText("Lỗi kết nối Cơ sở dữ liệu XAMPP!");
             lblStatus.setForeground(Color.RED);
@@ -106,34 +162,102 @@ public class UDPServer extends JFrame {
 
                 if (req.startsWith("SAVEMSG;;;")) {
                     String[] msgParts = req.split(";;;", 4);
-                    if (msgParts.length >= 4) saveMessage(msgParts[1], msgParts[2], msgParts[3]);
+                    if (msgParts.length >= 4) {
+                        markUserActive(msgParts[1]);
+                        saveMessage(msgParts[1], msgParts[2], msgParts[3]);
+                    }
                     res = "OK";
                 }
                 else if (req.startsWith("SAVEGROUPMSG;;;")) {
                     String[] msgParts = req.split(";;;", 4);
-                    if (msgParts.length >= 4) saveGroupMessage(Integer.parseInt(msgParts[1]), msgParts[2], msgParts[3]);
+                    if (msgParts.length >= 4) {
+                        markUserActive(msgParts[2]);
+                        saveGroupMessage(Integer.parseInt(msgParts[1]), msgParts[2], msgParts[3]);
+                    }
+                    res = "OK";
+                }
+                else if (req.startsWith("RECALLMSG;;;")) {
+                    String[] msgParts = req.split(";;;", 4);
+                    if (msgParts.length >= 4) {
+                        markUserActive(msgParts[1]);
+                        recallMessage(serverSocket, msgParts[1], msgParts[2], msgParts[3]);
+                    }
+                    res = "OK";
+                }
+                else if (req.startsWith("RECALLGROUPMSG;;;")) {
+                    String[] msgParts = req.split(";;;", 4);
+                    if (msgParts.length >= 4) {
+                        markUserActive(msgParts[2]);
+                        recallGroupMessage(serverSocket, Integer.parseInt(msgParts[1]), msgParts[2], msgParts[3]);
+                    }
+                    res = "OK";
+                }
+                else if (req.startsWith("ADDGROUPMEMBER;;;")) {
+                    String[] memParts = req.split(";;;", 3);
+                    if (memParts.length >= 3) {
+                        addGroupMembers(serverSocket, Integer.parseInt(memParts[1]), memParts[2]);
+                    }
+                    res = "OK";
+                }
+                else if (req.startsWith("LEAVEGROUP;;;")) {
+                    String[] leaveParts = req.split(";;;", 3);
+                    if (leaveParts.length >= 3) {
+                        int groupId = Integer.parseInt(leaveParts[1]);
+                        String leavingUser = leaveParts[2].trim();
+                        leaveGroup(serverSocket, groupId, leavingUser);
+                    }
                     res = "OK";
                 }
                 else if (parts[0].equals("GETGROUPMSG") && parts.length >= 2) {
                     res = getGroupMessages(Integer.parseInt(parts[1]));
                 }
                 else if (parts[0].equals("CREATEGROUP") && parts.length >= 4) {
+                    markUserActive(parts[2]);
                     res = createGroup(parts[1], parts[2], parts[3]);
                 }
-                else if (parts[0].equals("GETMSG") && parts.length >= 3) res = getMessages(parts[1], parts[2]);
-                else if (parts[0].equals("LOGIN") && parts.length >= 3) res = login(parts[1], parts[2]);
-                else if (parts[0].equals("REGISTER") && parts.length >= 7) res = register(parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
-                else if (parts[0].equals("UPDATE") && parts.length >= 4) res = update(parts[1], parts[2], parts[3]);
+                else if (parts[0].equals("GETMSG") && parts.length >= 3) {
+                    markUserActive(parts[1]);
+                    res = getMessages(parts[1], parts[2]);
+                }
+                else if (parts[0].equals("LOGIN") && parts.length >= 3) {
+                    res = login(parts[1], parts[2]);
+                }
+                else if (parts[0].equals("REGISTER") && parts.length >= 7) {
+                    res = register(parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
+                }
+                else if (parts[0].equals("UPDATE") && parts.length >= 4) {
+                    markUserActive(parts[1]);
+                    res = update(parts[1], parts[2], parts[3]);
+                }
                 else if (parts[0].equals("ONLINE") && parts.length >= 2) {
                     updateOnline(parts[1], p.getAddress().getHostAddress(), p.getPort());
                     res = "OK";
                 }
-                else if (parts[0].equals("SEARCH") && parts.length >= 2) res = search(parts[1]);
-                else if (parts[0].equals("ADD") && parts.length >= 3) res = addFriend(parts[1], parts[2]);
-                else if (parts[0].equals("ACCEPT") && parts.length >= 3) res = acceptFriend(parts[1], parts[2]);
-                else if (parts[0].equals("DECLINE") && parts.length >= 3) res = declineFriend(parts[1], parts[2]);
-                else if (parts[0].equals("UNFRIEND") && parts.length >= 3) res = unfriend(parts[1], parts[2]);
-                else if (parts[0].equals("GETDATA") && parts.length >= 2) res = getData(parts[1]);
+                else if (parts[0].equals("OFFLINE") && parts.length >= 2) {
+                    setOffline(parts[1]);
+                    res = "OK";
+                }
+                else if (parts[0].equals("SEARCH") && parts.length >= 2) {
+                    res = search(parts[1]);
+                }
+                else if (parts[0].equals("ADD") && parts.length >= 3) {
+                    markUserActive(parts[1]);
+                    res = addFriend(parts[1], parts[2]);
+                }
+                else if (parts[0].equals("ACCEPT") && parts.length >= 3) {
+                    markUserActive(parts[2]);
+                    res = acceptFriend(parts[1], parts[2]);
+                }
+                else if (parts[0].equals("DECLINE") && parts.length >= 3) {
+                    res = declineFriend(parts[1], parts[2]);
+                }
+                else if (parts[0].equals("UNFRIEND") && parts.length >= 3) {
+                    res = unfriend(parts[1], parts[2]);
+                }
+                else if (parts[0].equals("GETDATA") && parts.length >= 2) {
+                    updateOnline(parts[1], p.getAddress().getHostAddress(), p.getPort());
+                    res = getData(parts[1]);
+                }
 
                 if (!res.equals("OK")) {
                     byte[] sendData = res.getBytes("UTF-8");
@@ -148,6 +272,206 @@ public class UDPServer extends JFrame {
 
     private static Connection getConn() throws Exception {
         return DriverManager.getConnection("jdbc:mysql://localhost:3306/p2p_chat?characterEncoding=UTF8", "root", "");
+    }
+
+    private static void addGroupMembers(DatagramSocket socket, int groupId, String membersCsv) {
+        if (membersCsv == null || membersCsv.trim().isEmpty()) return;
+        try (Connection c = getConn()) {
+            String insertSql = "INSERT IGNORE INTO group_members(group_id, username) VALUES(?, ?)";
+            try (PreparedStatement ps = c.prepareStatement(insertSql)) {
+                for (String m : membersCsv.split(",")) {
+                    String cleanUser = m.trim();
+                    if (!cleanUser.isEmpty()) {
+                        markUserActive(cleanUser);
+                        ps.setInt(1, groupId);
+                        ps.setString(2, cleanUser);
+                        ps.addBatch();
+                    }
+                }
+                ps.executeBatch();
+            }
+
+            // Báo tất cả thành viên đang online trong nhóm tải lại dữ liệu nhóm ngay lập tức
+            String syncSql = "SELECT u.username, u.ip, u.port FROM users u " +
+                    "JOIN group_members gm ON u.username = gm.username " +
+                    "WHERE gm.group_id = ? AND u.ip IS NOT NULL AND u.port > 0";
+            try (PreparedStatement psSync = c.prepareStatement(syncSql)) {
+                psSync.setInt(1, groupId);
+                ResultSet rs = psSync.executeQuery();
+                byte[] syncBytes = "FORCE_SYNC;;;".getBytes("UTF-8");
+                while (rs.next()) {
+                    String mUser = rs.getString("username");
+                    String ip = rs.getString("ip");
+                    int port = rs.getInt("port");
+                    if (isUserOnline(mUser) && ip != null && port > 0) {
+                        socket.send(new DatagramPacket(syncBytes, syncBytes.length, InetAddress.getByName(ip), port));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+    private static void leaveGroup(DatagramSocket socket, int groupId, String username) {
+        if (username == null || username.isEmpty()) return;
+        try (Connection c = getConn()) {
+            // Lấy danh sách thành viên hiện tại trong nhóm trước khi xóa để báo đồng bộ cho họ
+            java.util.List<String[]> targets = new java.util.ArrayList<>();
+            String listSql = "SELECT u.username, u.ip, u.port FROM users u " +
+                    "JOIN group_members gm ON u.username = gm.username " +
+                    "WHERE gm.group_id = ? AND u.ip IS NOT NULL AND u.port > 0";
+            try (PreparedStatement psList = c.prepareStatement(listSql)) {
+                psList.setInt(1, groupId);
+                ResultSet rs = psList.executeQuery();
+                while (rs.next()) {
+                    targets.add(new String[]{
+                            rs.getString("username"),
+                            rs.getString("ip"),
+                            String.valueOf(rs.getInt("port"))
+                    });
+                }
+            }
+
+            // Xóa thành viên rời nhóm khỏi bảng group_members
+            try (PreparedStatement psDel = c.prepareStatement("DELETE FROM group_members WHERE group_id = ? AND username = ?")) {
+                psDel.setInt(1, groupId);
+                psDel.setString(2, username);
+                psDel.executeUpdate();
+            }
+
+            // Nếu nhóm không còn ai thì xóa luôn nhóm và tin nhắn nhóm cho sạch DB
+            int remaining = 0;
+            try (PreparedStatement psCount = c.prepareStatement("SELECT COUNT(*) FROM group_members WHERE group_id = ?")) {
+                psCount.setInt(1, groupId);
+                ResultSet rsCount = psCount.executeQuery();
+                if (rsCount.next()) remaining = rsCount.getInt(1);
+            }
+            if (remaining == 0) {
+                try (PreparedStatement psDelMsg = c.prepareStatement("DELETE FROM group_messages WHERE group_id = ?")) {
+                    psDelMsg.setInt(1, groupId);
+                    psDelMsg.executeUpdate();
+                }
+                try (PreparedStatement psDelGrp = c.prepareStatement("DELETE FROM chat_groups WHERE id = ?")) {
+                    psDelGrp.setInt(1, groupId);
+                    psDelGrp.executeUpdate();
+                }
+            }
+
+            // Báo FORCE_SYNC để những người còn lại cập nhật lại danh sách thành viên/nhóm ngay
+            byte[] syncBytes = "FORCE_SYNC;;;".getBytes("UTF-8");
+            for (String[] t : targets) {
+                String mUser = t[0];
+                String ip = t[1];
+                int port = Integer.parseInt(t[2]);
+                if (isUserOnline(mUser) && ip != null && port > 0) {
+                    socket.send(new DatagramPacket(syncBytes, syncBytes.length, InetAddress.getByName(ip), port));
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void recallMessage(DatagramSocket socket, String sender, String receiver, String msgIdOrContent) {
+        try (Connection c = getConn()) {
+            String cleanId = msgIdOrContent.trim();
+            if (cleanId.startsWith("[MID:")) {
+                int endIdx = cleanId.indexOf(']');
+                if (endIdx != -1) cleanId = cleanId.substring(5, endIdx);
+            }
+            String recalledValue = "[MID:" + cleanId + "][RECALLED]";
+
+            // Cập nhật tin nhắn trong DB thành [MID:<id>][RECALLED] để khi mở lại lịch sử vẫn giữ trạng thái thu hồi
+            String sqlById = "UPDATE messages SET content = ? WHERE sender = ? AND receiver = ? AND content LIKE ?";
+            int updated = 0;
+            try (PreparedStatement ps = c.prepareStatement(sqlById)) {
+                ps.setString(1, recalledValue);
+                ps.setString(2, sender);
+                ps.setString(3, receiver);
+                ps.setString(4, "[MID:" + cleanId + "]%");
+                updated = ps.executeUpdate();
+            }
+
+            if (updated == 0) {
+                String sqlFallback = "UPDATE messages SET content = ? " +
+                        "WHERE id = (SELECT id FROM (SELECT id FROM messages WHERE sender=? AND receiver=? AND content=? ORDER BY id DESC LIMIT 1) AS tmp)";
+                try (PreparedStatement ps = c.prepareStatement(sqlFallback)) {
+                    ps.setString(1, recalledValue);
+                    ps.setString(2, sender);
+                    ps.setString(3, receiver);
+                    ps.setString(4, msgIdOrContent);
+                    ps.executeUpdate();
+                }
+            }
+
+            if (isUserOnline(receiver)) {
+                try (PreparedStatement psUser = c.prepareStatement("SELECT ip, port FROM users WHERE username=?")) {
+                    psUser.setString(1, receiver);
+                    ResultSet rs = psUser.executeQuery();
+                    if (rs.next()) {
+                        String ip = rs.getString("ip");
+                        int port = rs.getInt("port");
+                        if (ip != null && port > 0) {
+                            byte[] notify = ("RECALL_NOTIFY;;;" + sender + ";;;" + cleanId).getBytes("UTF-8");
+                            socket.send(new DatagramPacket(notify, notify.length, InetAddress.getByName(ip), port));
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void recallGroupMessage(DatagramSocket socket, int groupId, String sender, String msgIdOrContent) {
+        try (Connection c = getConn()) {
+            String cleanId = msgIdOrContent.trim();
+            if (cleanId.startsWith("[MID:")) {
+                int endIdx = cleanId.indexOf(']');
+                if (endIdx != -1) cleanId = cleanId.substring(5, endIdx);
+            }
+            String recalledValue = "[MID:" + cleanId + "][RECALLED]";
+
+            String sqlById = "UPDATE group_messages SET content = ? WHERE group_id = ? AND sender = ? AND content LIKE ?";
+            int updated = 0;
+            try (PreparedStatement ps = c.prepareStatement(sqlById)) {
+                ps.setString(1, recalledValue);
+                ps.setInt(2, groupId);
+                ps.setString(3, sender);
+                ps.setString(4, "[MID:" + cleanId + "]%");
+                updated = ps.executeUpdate();
+            }
+
+            if (updated == 0) {
+                String sqlFallback = "UPDATE group_messages SET content = ? " +
+                        "WHERE id = (SELECT id FROM (SELECT id FROM group_messages WHERE group_id=? AND sender=? AND content=? ORDER BY id DESC LIMIT 1) AS tmp)";
+                try (PreparedStatement ps = c.prepareStatement(sqlFallback)) {
+                    ps.setString(1, recalledValue);
+                    ps.setInt(2, groupId);
+                    ps.setString(3, sender);
+                    ps.setString(4, msgIdOrContent);
+                    ps.executeUpdate();
+                }
+            }
+
+            try (PreparedStatement psMem = c.prepareStatement(
+                    "SELECT u.username, u.ip, u.port FROM users u JOIN group_members gm ON u.username = gm.username WHERE gm.group_id=? AND u.username!=?")) {
+                psMem.setInt(1, groupId);
+                psMem.setString(2, sender);
+                ResultSet rs = psMem.executeQuery();
+                byte[] notify = ("RECALL_GROUP_NOTIFY;;;" + groupId + ";;;" + sender + ";;;" + cleanId).getBytes("UTF-8");
+                while (rs.next()) {
+                    String mUser = rs.getString("username");
+                    String ip = rs.getString("ip");
+                    int port = rs.getInt("port");
+                    if (isUserOnline(mUser) && ip != null && port > 0) {
+                        socket.send(new DatagramPacket(notify, notify.length, InetAddress.getByName(ip), port));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private static String createGroup(String groupName, String creator, String membersCsv) {
@@ -175,15 +499,21 @@ public class UDPServer extends JFrame {
                 }
                 return "CREATEGROUP_OK;;;" + groupId + ";;;" + groupName;
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         return "FAIL";
     }
 
     private static void saveGroupMessage(int groupId, String sender, String content) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO group_messages(group_id, sender, content) VALUES(?,?,?)")) {
-            s.setInt(1, groupId); s.setString(2, sender); s.setString(3, content);
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("INSERT INTO group_messages(group_id, sender, content) VALUES(?,?,?)")) {
+            s.setInt(1, groupId);
+            s.setString(2, sender);
+            s.setString(3, content);
             s.executeUpdate();
-        } catch (Exception e) {}
+        } catch (Exception ignored) {
+        }
     }
 
     private static String getGroupMessages(int groupId) {
@@ -198,114 +528,199 @@ public class UDPServer extends JFrame {
                 String fname = rs.getString("fullname") != null ? rs.getString("fullname") : sender;
                 sb.append(sender).append("^").append(fname).append("::").append(rs.getString("content")).append("||");
             }
-        } catch (Exception e) {}
+        } catch (Exception ignored) {
+        }
         return sb.toString();
     }
 
     private static void saveMessage(String sender, String receiver, String content) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO messages(sender, receiver, content) VALUES(?,?,?)")) {
-            s.setString(1, sender); s.setString(2, receiver); s.setString(3, content);
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("INSERT INTO messages(sender, receiver, content) VALUES(?,?,?)")) {
+            s.setString(1, sender);
+            s.setString(2, receiver);
+            s.setString(3, content);
             s.executeUpdate();
-        } catch (Exception e) {}
+        } catch (Exception ignored) {
+        }
     }
 
     private static String getMessages(String u1, String u2) {
         StringBuilder sb = new StringBuilder("MSGDATA;;;");
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("SELECT sender, content FROM messages WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?) ORDER BY id ASC")) {
-            s.setString(1, u1); s.setString(2, u2); s.setString(3, u2); s.setString(4, u1);
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("SELECT sender, content FROM messages WHERE (sender=? AND receiver=?) OR (sender=? AND receiver=?) ORDER BY id ASC")) {
+            s.setString(1, u1);
+            s.setString(2, u2);
+            s.setString(3, u2);
+            s.setString(4, u1);
             ResultSet rs = s.executeQuery();
-            while(rs.next()) {
+            while (rs.next()) {
                 sb.append(rs.getString("sender")).append("::").append(rs.getString("content")).append("||");
             }
-        } catch (Exception e) {}
+        } catch (Exception ignored) {
+        }
         return sb.toString();
     }
 
     private static String login(String u, String p) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("SELECT fullname, avatar FROM users WHERE username=? AND password=?")) {
-            s.setString(1, u); s.setString(2, p); ResultSet rs = s.executeQuery();
-            if (rs.next()) return "SUCCESS;;;" + (rs.getString("fullname")!=null?rs.getString("fullname"):"") + ";;;" + (rs.getString("avatar")!=null?rs.getString("avatar"):"");
-        } catch (Exception e) {} return "FAIL";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("SELECT fullname, avatar FROM users WHERE username=? AND password=?")) {
+            s.setString(1, u);
+            s.setString(2, p);
+            ResultSet rs = s.executeQuery();
+            if (rs.next()) {
+                markUserActive(u);
+                return "SUCCESS;;;" + (rs.getString("fullname") != null ? rs.getString("fullname") : "") + ";;;" + (rs.getString("avatar") != null ? rs.getString("avatar") : "");
+            }
+        } catch (Exception ignored) {
+        }
+        return "FAIL";
     }
 
     private static String register(String u, String p, String n, String e, String ph, String g) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO users(username, password, fullname, email, phone, gender) VALUES(?,?,?,?,?,?)")) {
-            s.setString(1, u); s.setString(2, p); s.setString(3, n); s.setString(4, e); s.setString(5, ph); s.setString(6, g);
-            s.executeUpdate(); return "SUCCESS";
-        } catch (Exception ex) { return "FAIL"; }
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("INSERT INTO users(username, password, fullname, email, phone, gender) VALUES(?,?,?,?,?,?)")) {
+            s.setString(1, u);
+            s.setString(2, p);
+            s.setString(3, n);
+            s.setString(4, e);
+            s.setString(5, ph);
+            s.setString(6, g);
+            s.executeUpdate();
+            return "SUCCESS";
+        } catch (Exception ex) {
+            return "FAIL";
+        }
     }
 
     private static String update(String u, String n, String a) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("UPDATE users SET fullname=?, avatar=? WHERE username=?")) {
-            s.setString(1, n); s.setString(2, a); s.setString(3, u); s.executeUpdate(); return "SUCCESS";
-        } catch (Exception e) {} return "FAIL";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("UPDATE users SET fullname=?, avatar=? WHERE username=?")) {
+            s.setString(1, n);
+            s.setString(2, a);
+            s.setString(3, u);
+            s.executeUpdate();
+            return "SUCCESS";
+        } catch (Exception ignored) {
+        }
+        return "FAIL";
     }
 
     private static void updateOnline(String u, String ip, int port) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("UPDATE users SET ip=?, port=? WHERE username=?")) {
-            s.setString(1, ip); s.setInt(2, port); s.setString(3, u); s.executeUpdate();
-        } catch (Exception e) {}
+        markUserActive(u);
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("UPDATE users SET ip=?, port=? WHERE username=?")) {
+            s.setString(1, ip);
+            s.setInt(2, port);
+            s.setString(3, u);
+            s.executeUpdate();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void setOffline(String u) {
+        if (u != null) {
+            lastSeenMap.remove(u.trim());
+        }
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("UPDATE users SET ip=NULL, port=0 WHERE username=?")) {
+            s.setString(1, u);
+            s.executeUpdate();
+        } catch (Exception ignored) {
+        }
     }
 
     private static String search(String p) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("SELECT username, fullname FROM users WHERE phone=? OR username=?")) {
-            s.setString(1, p); s.setString(2, p); ResultSet rs = s.executeQuery();
-            if(rs.next()) return "SEARCHRES;;;" + rs.getString("username") + ";;;" + rs.getString("fullname");
-        } catch (Exception e) {} return "NOTFOUND";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("SELECT username, fullname FROM users WHERE phone=? OR username=?")) {
+            s.setString(1, p);
+            s.setString(2, p);
+            ResultSet rs = s.executeQuery();
+            if (rs.next()) return "SEARCHRES;;;" + rs.getString("username") + ";;;" + rs.getString("fullname");
+        } catch (Exception ignored) {
+        }
+        return "NOTFOUND";
     }
 
     private static String addFriend(String u1, String u2) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO friends(user1, user2, status) VALUES(?,?,0)")) {
-            s.setString(1, u1); s.setString(2, u2); s.executeUpdate(); return "ADD_OK";
-        } catch (Exception e) {} return "FAIL";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("INSERT INTO friends(user1, user2, status) VALUES(?,?,0)")) {
+            s.setString(1, u1);
+            s.setString(2, u2);
+            s.executeUpdate();
+            return "ADD_OK";
+        } catch (Exception ignored) {
+        }
+        return "FAIL";
     }
 
     private static String acceptFriend(String u1, String u2) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("UPDATE friends SET status=1 WHERE user1=? AND user2=?")) {
-            s.setString(1, u1); s.setString(2, u2); s.executeUpdate(); return "ACCEPT_OK";
-        } catch (Exception e) {} return "FAIL";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("UPDATE friends SET status=1 WHERE user1=? AND user2=?")) {
+            s.setString(1, u1);
+            s.setString(2, u2);
+            s.executeUpdate();
+            return "ACCEPT_OK";
+        } catch (Exception ignored) {
+        }
+        return "FAIL";
     }
 
     private static String declineFriend(String u1, String u2) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("DELETE FROM friends WHERE user1=? AND user2=? AND status=0")) {
-            s.setString(1, u1); s.setString(2, u2); s.executeUpdate(); return "DECLINE_OK";
-        } catch (Exception e) {} return "FAIL";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("DELETE FROM friends WHERE user1=? AND user2=? AND status=0")) {
+            s.setString(1, u1);
+            s.setString(2, u2);
+            s.executeUpdate();
+            return "DECLINE_OK";
+        } catch (Exception ignored) {
+        }
+        return "FAIL";
     }
 
     private static String unfriend(String u1, String u2) {
-        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("DELETE FROM friends WHERE (user1=? AND user2=?) OR (user1=? AND user2=?)")) {
-            s.setString(1, u1); s.setString(2, u2);
-            s.setString(3, u2); s.setString(4, u1);
-            s.executeUpdate(); return "UNFRIEND_OK";
-        } catch (Exception e) {} return "FAIL";
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement("DELETE FROM friends WHERE (user1=? AND user2=?) OR (user1=? AND user2=?)")) {
+            s.setString(1, u1);
+            s.setString(2, u2);
+            s.setString(3, u2);
+            s.setString(4, u1);
+            s.executeUpdate();
+            return "UNFRIEND_OK";
+        } catch (Exception ignored) {
+        }
+        return "FAIL";
     }
 
     private static String getData(String u) {
         StringBuilder sb = new StringBuilder("DATA;;;");
         try (Connection c = getConn()) {
-            // 1. Danh sách bạn bè
             PreparedStatement s1 = c.prepareStatement("SELECT u.username, u.fullname, u.ip, u.port, u.avatar FROM users u JOIN friends f ON (f.user1=u.username OR f.user2=u.username) WHERE (f.user1=? OR f.user2=?) AND f.status=1 AND u.username!=?");
-            s1.setString(1, u); s1.setString(2, u); s1.setString(3, u);
+            s1.setString(1, u);
+            s1.setString(2, u);
+            s1.setString(3, u);
             ResultSet r1 = s1.executeQuery();
-            while(r1.next()) {
+            while (r1.next()) {
+                String fUser = r1.getString(1);
+                boolean online = isUserOnline(fUser);
+                String fIp = online ? r1.getString(3) : "null";
+                int fPort = online ? r1.getInt(4) : 0;
+
                 String avtStr = r1.getString("avatar");
                 if (avtStr == null || avtStr.isEmpty()) avtStr = "null";
-                sb.append(r1.getString(1)).append(":")
+                sb.append(fUser).append(":")
                         .append(r1.getString(2)).append(":")
-                        .append(r1.getString(3)).append(":")
-                        .append(r1.getInt(4)).append(":")
+                        .append(fIp).append(":")
+                        .append(fPort).append(":")
                         .append(avtStr).append("|");
             }
             sb.append("###");
 
-            // 2. Danh sách lời mời kết bạn
             PreparedStatement s2 = c.prepareStatement("SELECT u.username, u.fullname FROM users u JOIN friends f ON f.user1=u.username WHERE f.user2=? AND f.status=0");
             s2.setString(1, u);
             ResultSet r2 = s2.executeQuery();
-            while(r2.next()) sb.append(r2.getString(1)).append(":").append(r2.getString(2)).append("|");
+            while (r2.next()) sb.append(r2.getString(1)).append(":").append(r2.getString(2)).append("|");
             sb.append("###");
 
-            // 3. Danh sách nhóm riêng mà user tham gia
             PreparedStatement s3 = c.prepareStatement("SELECT g.id, g.group_name FROM chat_groups g JOIN group_members gm ON g.id = gm.group_id WHERE gm.username=? ORDER BY g.id DESC");
             s3.setString(1, u);
             ResultSet r3 = s3.executeQuery();
@@ -318,14 +733,20 @@ public class UDPServer extends JFrame {
                 sMem.setInt(1, gid);
                 ResultSet rMem = sMem.executeQuery();
                 while (rMem.next()) {
-                    sb.append(rMem.getString(1)).append("^")
+                    String mUser = rMem.getString(1);
+                    boolean online = isUserOnline(mUser);
+                    String mIp = online ? rMem.getString(3) : "null";
+                    int mPort = online ? rMem.getInt(4) : 0;
+
+                    sb.append(mUser).append("^")
                             .append(rMem.getString(2)).append("^")
-                            .append(rMem.getString(3)).append("^")
-                            .append(rMem.getInt(4)).append(",");
+                            .append(mIp).append("^")
+                            .append(mPort).append(",");
                 }
                 sb.append("|");
             }
-        } catch (Exception e) {}
+        } catch (Exception ignored) {
+        }
         return sb.toString();
     }
 
