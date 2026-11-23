@@ -19,6 +19,7 @@ repositories {
 }
 
 dependencies {
+    implementation 'com.formdev:flatlaf:3.8'
     implementation 'mysql:mysql-connector-java:8.0.33'
     implementation 'org.springframework.boot:spring-boot-starter'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

@@ -1,5 +1,7 @@
 package com.heal.doan_ltm.server;
 
+import com.formdev.flatlaf.FlatLightLaf;
+
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
@@ -14,21 +16,21 @@ public class UDPServer extends JFrame {
 
     public UDPServer() {
         setTitle("Z-Voice P2P - MÁY CHỦ TRUNG TÂM");
-        setSize(700, 450);
+        setSize(720, 460);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
 
         lblStatus = new JLabel("Đang khởi động Máy chủ UDP trên cổng 8080...", SwingConstants.CENTER);
         lblStatus.setFont(new Font("SansSerif", Font.BOLD, 16));
-        lblStatus.setForeground(new Color(46, 204, 113));
+        lblStatus.setForeground(new Color(0, 104, 255));
         lblStatus.setBorder(BorderFactory.createEmptyBorder(15, 10, 15, 10));
         add(lblStatus, BorderLayout.NORTH);
 
         String[] columns = {"Tài khoản (Username)", "Tên hiển thị", "Địa chỉ IP", "Cổng (Port)"};
         tableModel = new DefaultTableModel(columns, 0);
         table = new JTable(tableModel);
-        table.setRowHeight(25);
+        table.setRowHeight(28);
         table.setFont(new Font("SansSerif", Font.PLAIN, 14));
         table.getTableHeader().setFont(new Font("SansSerif", Font.BOLD, 14));
 
@@ -37,6 +39,7 @@ public class UDPServer extends JFrame {
 
         Timer timer = new Timer(3000, e -> refreshOnlineUsers());
         timer.start();
+
         JPanel pnlBroadcast = new JPanel(new BorderLayout(10, 5));
         pnlBroadcast.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         JTextField txtBroadcast = new JTextField();
@@ -54,9 +57,8 @@ public class UDPServer extends JFrame {
         btnBroadcast.addActionListener(e -> {
             String msg = "SERVER_MSG:::" + txtBroadcast.getText();
             try (DatagramSocket socket = new DatagramSocket()) {
-                socket.setBroadcast(true); // Bật chế độ Broadcast
+                socket.setBroadcast(true);
                 byte[] data = msg.getBytes("UTF-8");
-                // Gửi tới IP Broadcast mặc định 255.255.255.255 trên cổng 8888
                 DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), 8888);
                 socket.send(packet);
                 txtBroadcast.setText("");
@@ -67,16 +69,11 @@ public class UDPServer extends JFrame {
         new Thread(this::startUDPServer).start();
     }
 
-    // Hàm tự động quét Database để in ra danh sách ai đang có mạng
     private void refreshOnlineUsers() {
         try (Connection c = getConn();
              PreparedStatement s = c.prepareStatement("SELECT username, fullname, ip, port FROM users WHERE port > 0 AND ip IS NOT NULL")) {
             ResultSet rs = s.executeQuery();
-
-            // Xóa dữ liệu cũ trên bảng
             tableModel.setRowCount(0);
-
-            // Đổ dữ liệu mới vào bảng
             int count = 0;
             while (rs.next()) {
                 tableModel.addRow(new Object[]{
@@ -88,13 +85,13 @@ public class UDPServer extends JFrame {
                 count++;
             }
             lblStatus.setText("Server P2P hoạt động ở cổng 8080 | Số người đang Online: " + count);
+            lblStatus.setForeground(new Color(0, 104, 255));
         } catch (Exception e) {
             lblStatus.setText("Lỗi kết nối Cơ sở dữ liệu XAMPP!");
             lblStatus.setForeground(Color.RED);
         }
     }
 
-    // --- VÒNG LẶP LẮNG NGHE UDP CHẠY Ở LUỒNG RIÊNG ---
     private void startUDPServer() {
         System.out.println("====== SERVER P2P VOICE CHAT ĐANG CHẠY TRÊN CỔNG 8080 ======");
         try (DatagramSocket serverSocket = new DatagramSocket(8080)) {
@@ -105,13 +102,23 @@ public class UDPServer extends JFrame {
                 String req = new String(p.getData(), 0, p.getLength(), "UTF-8");
                 String res = "FAIL";
 
-                // Tách gói tin để phân loại
                 String[] parts = req.split(";;;", -1);
 
                 if (req.startsWith("SAVEMSG;;;")) {
                     String[] msgParts = req.split(";;;", 4);
                     if (msgParts.length >= 4) saveMessage(msgParts[1], msgParts[2], msgParts[3]);
                     res = "OK";
+                }
+                else if (req.startsWith("SAVEGROUPMSG;;;")) {
+                    String[] msgParts = req.split(";;;", 4);
+                    if (msgParts.length >= 4) saveGroupMessage(Integer.parseInt(msgParts[1]), msgParts[2], msgParts[3]);
+                    res = "OK";
+                }
+                else if (parts[0].equals("GETGROUPMSG") && parts.length >= 2) {
+                    res = getGroupMessages(Integer.parseInt(parts[1]));
+                }
+                else if (parts[0].equals("CREATEGROUP") && parts.length >= 4) {
+                    res = createGroup(parts[1], parts[2], parts[3]);
                 }
                 else if (parts[0].equals("GETMSG") && parts.length >= 3) res = getMessages(parts[1], parts[2]);
                 else if (parts[0].equals("LOGIN") && parts.length >= 3) res = login(parts[1], parts[2]);
@@ -135,13 +142,64 @@ public class UDPServer extends JFrame {
             }
         } catch (Exception e) {
             e.printStackTrace();
-            JOptionPane.showMessageDialog(this, "Lỗi không thể mở cổng 8080. Cổng này đang bị phần mềm khác chiếm dụng!", "Lỗi Server", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Lỗi không thể mở cổng 8080!", "Lỗi Server", JOptionPane.ERROR_MESSAGE);
         }
     }
 
-    // --- CÁC HÀM XỬ LÝ DATABASE GIỮ NGUYÊN ---
     private static Connection getConn() throws Exception {
         return DriverManager.getConnection("jdbc:mysql://localhost:3306/p2p_chat?characterEncoding=UTF8", "root", "");
+    }
+
+    private static String createGroup(String groupName, String creator, String membersCsv) {
+        try (Connection c = getConn()) {
+            PreparedStatement ps = c.prepareStatement("INSERT INTO chat_groups(group_name, created_by) VALUES(?,?)", Statement.RETURN_GENERATED_KEYS);
+            ps.setString(1, groupName);
+            ps.setString(2, creator);
+            ps.executeUpdate();
+            ResultSet keys = ps.getGeneratedKeys();
+            if (keys.next()) {
+                int groupId = keys.getInt(1);
+                PreparedStatement psMem = c.prepareStatement("INSERT IGNORE INTO group_members(group_id, username) VALUES(?,?)");
+                psMem.setInt(1, groupId);
+                psMem.setString(2, creator);
+                psMem.executeUpdate();
+
+                if (!membersCsv.isEmpty()) {
+                    for (String m : membersCsv.split(",")) {
+                        if (!m.trim().isEmpty()) {
+                            psMem.setInt(1, groupId);
+                            psMem.setString(2, m.trim());
+                            psMem.executeUpdate();
+                        }
+                    }
+                }
+                return "CREATEGROUP_OK;;;" + groupId + ";;;" + groupName;
+            }
+        } catch (Exception e) { e.printStackTrace(); }
+        return "FAIL";
+    }
+
+    private static void saveGroupMessage(int groupId, String sender, String content) {
+        try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO group_messages(group_id, sender, content) VALUES(?,?,?)")) {
+            s.setInt(1, groupId); s.setString(2, sender); s.setString(3, content);
+            s.executeUpdate();
+        } catch (Exception e) {}
+    }
+
+    private static String getGroupMessages(int groupId) {
+        StringBuilder sb = new StringBuilder("GROUPMSGDATA;;;").append(groupId).append(";;;");
+        try (Connection c = getConn();
+             PreparedStatement s = c.prepareStatement(
+                     "SELECT gm.sender, u.fullname, gm.content FROM group_messages gm LEFT JOIN users u ON gm.sender = u.username WHERE gm.group_id=? ORDER BY gm.id ASC")) {
+            s.setInt(1, groupId);
+            ResultSet rs = s.executeQuery();
+            while (rs.next()) {
+                String sender = rs.getString("sender");
+                String fname = rs.getString("fullname") != null ? rs.getString("fullname") : sender;
+                sb.append(sender).append("^").append(fname).append("::").append(rs.getString("content")).append("||");
+            }
+        } catch (Exception e) {}
+        return sb.toString();
     }
 
     private static void saveMessage(String sender, String receiver, String content) {
@@ -167,14 +225,14 @@ public class UDPServer extends JFrame {
         try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("SELECT fullname, avatar FROM users WHERE username=? AND password=?")) {
             s.setString(1, u); s.setString(2, p); ResultSet rs = s.executeQuery();
             if (rs.next()) return "SUCCESS;;;" + (rs.getString("fullname")!=null?rs.getString("fullname"):"") + ";;;" + (rs.getString("avatar")!=null?rs.getString("avatar"):"");
-        } catch (Exception e) { System.err.println("LỖI ĐĂNG NHẬP: " + e.getMessage()); } return "FAIL";
+        } catch (Exception e) {} return "FAIL";
     }
 
     private static String register(String u, String p, String n, String e, String ph, String g) {
         try (Connection c = getConn(); PreparedStatement s = c.prepareStatement("INSERT INTO users(username, password, fullname, email, phone, gender) VALUES(?,?,?,?,?,?)")) {
             s.setString(1, u); s.setString(2, p); s.setString(3, n); s.setString(4, e); s.setString(5, ph); s.setString(6, g);
-            s.executeUpdate(); System.out.println("-> Đăng ký thành công tài khoản: " + u); return "SUCCESS";
-        } catch (Exception ex) { System.err.println("LỖI ĐĂNG KÝ: " + ex.getMessage()); return "FAIL"; }
+            s.executeUpdate(); return "SUCCESS";
+        } catch (Exception ex) { return "FAIL"; }
     }
 
     private static String update(String u, String n, String a) {
@@ -225,15 +283,13 @@ public class UDPServer extends JFrame {
     private static String getData(String u) {
         StringBuilder sb = new StringBuilder("DATA;;;");
         try (Connection c = getConn()) {
-            // ĐÃ THÊM u.avatar VÀO CÂU LUYỆN TRUY VẤN
+            // 1. Danh sách bạn bè
             PreparedStatement s1 = c.prepareStatement("SELECT u.username, u.fullname, u.ip, u.port, u.avatar FROM users u JOIN friends f ON (f.user1=u.username OR f.user2=u.username) WHERE (f.user1=? OR f.user2=?) AND f.status=1 AND u.username!=?");
             s1.setString(1, u); s1.setString(2, u); s1.setString(3, u);
             ResultSet r1 = s1.executeQuery();
             while(r1.next()) {
                 String avtStr = r1.getString("avatar");
                 if (avtStr == null || avtStr.isEmpty()) avtStr = "null";
-
-                // Nối thêm thông tin avatar vào sau port (cách nhau bởi dấu hai chấm)
                 sb.append(r1.getString(1)).append(":")
                         .append(r1.getString(2)).append(":")
                         .append(r1.getString(3)).append(":")
@@ -241,19 +297,40 @@ public class UDPServer extends JFrame {
                         .append(avtStr).append("|");
             }
             sb.append("###");
+
+            // 2. Danh sách lời mời kết bạn
             PreparedStatement s2 = c.prepareStatement("SELECT u.username, u.fullname FROM users u JOIN friends f ON f.user1=u.username WHERE f.user2=? AND f.status=0");
             s2.setString(1, u);
             ResultSet r2 = s2.executeQuery();
             while(r2.next()) sb.append(r2.getString(1)).append(":").append(r2.getString(2)).append("|");
+            sb.append("###");
+
+            // 3. Danh sách nhóm riêng mà user tham gia
+            PreparedStatement s3 = c.prepareStatement("SELECT g.id, g.group_name FROM chat_groups g JOIN group_members gm ON g.id = gm.group_id WHERE gm.username=? ORDER BY g.id DESC");
+            s3.setString(1, u);
+            ResultSet r3 = s3.executeQuery();
+            while (r3.next()) {
+                int gid = r3.getInt("id");
+                String gname = r3.getString("group_name");
+                sb.append(gid).append("~").append(gname).append("~");
+
+                PreparedStatement sMem = c.prepareStatement("SELECT u.username, u.fullname, u.ip, u.port FROM users u JOIN group_members gm ON u.username = gm.username WHERE gm.group_id=?");
+                sMem.setInt(1, gid);
+                ResultSet rMem = sMem.executeQuery();
+                while (rMem.next()) {
+                    sb.append(rMem.getString(1)).append("^")
+                            .append(rMem.getString(2)).append("^")
+                            .append(rMem.getString(3)).append("^")
+                            .append(rMem.getInt(4)).append(",");
+                }
+                sb.append("|");
+            }
         } catch (Exception e) {}
         return sb.toString();
     }
 
-    // --- HÀM MAIN MỚI ---
     public static void main(String[] args) {
-        // Đảm bảo giao diện được khởi tạo an toàn
-        SwingUtilities.invokeLater(() -> {
-            new UDPServer().setVisible(true);
-        });
+        FlatLightLaf.setup();
+        SwingUtilities.invokeLater(() -> new UDPServer().setVisible(true));
     }
 }
